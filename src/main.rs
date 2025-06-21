@@ -190,7 +190,6 @@ fn main() -> Result<(), Error> {
                 }
                 WindowEvent::RedrawRequested => {
                     let mut movesize = (forward * forward + to_side * to_side).sqrt().max(1.0f32);
-                    camera.cframe.multiply_vector(to_side / movesize * CAMERA_MOVE_SPEED, 0f32, forward / movesize * CAMERA_MOVE_SPEED);
                     if clicked {
                         camera.reset_rotation();
                         yaw += cursor_side * CAMERA_ROTATE_SPEED;
