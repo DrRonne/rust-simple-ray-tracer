@@ -77,6 +77,18 @@ impl CFrame {
         self.r21 = tr21;
         self.r22 = tr22;
     }
+
+    pub fn get_forward(&self) -> (f32, f32, f32) {
+        (self.r20, self.r21, self.r22)
+    }
+
+    pub fn get_right(&self) -> (f32, f32, f32) {
+        (self.r00, self.r10, self.r20)
+    }
+
+    pub fn get_up(&self) -> (f32, f32, f32) {
+        (self.r01, self.r11, self.r21)
+    }
 }
 
 impl Default for CFrame {
