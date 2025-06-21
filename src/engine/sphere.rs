@@ -6,6 +6,9 @@ pub struct Sphere {
     cframe: CFrame,
     radius: f32,
     color: Vec<u8>,
+    reflectance: f32,
+    transparency: f32,
+    refractive_index: f32,
 }
 
 impl Sphere {
@@ -19,11 +22,23 @@ impl Sphere {
 
 impl Renderable for Sphere {
     fn get_render_object(&mut self) -> RenderObject {
-        return RenderObject::new(self.cframe, RenderType::SPHERE, vec![self.radius], self.color.clone());
+        return RenderObject::new(self.cframe, RenderType::SPHERE, vec![self.radius], self.color.clone(), self.reflectance, self.transparency, self.refractive_index);
     }
 
     fn set_color(&mut self, red: u8, green: u8, blue: u8) {
         self.color = vec![red, green, blue];
+    }
+
+    fn set_reflectance(&mut self, reflectance: f32) {
+        self.reflectance = reflectance;
+    }
+
+    fn set_transparency(&mut self, transparency: f32) {
+        self.transparency = transparency;
+    }
+
+    fn set_refractive_index(&mut self, refractive_index: f32) {
+        self.refractive_index = refractive_index;
     }
 }
 
