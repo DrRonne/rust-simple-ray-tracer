@@ -33,11 +33,16 @@ fn main() -> Result<(), Error> {
     let mut sphere = Sphere::new(10f32);
     let mut sphere2 = Sphere::new(10f32);
     let mut floor = Sphere::new(100000f32);
-    sphere.set_position(-10f32, 15f32, -70f32);
-    sphere2.set_position(15f32, 5f32, -70f32);
+    sphere.set_position(0f32, 0f32, -20f32);
+    sphere2.set_position(0f32, 0f32, 20f32);
     floor.set_position(0f32, -100002f32, 0f32);
     sphere.set_color(0xffu8, 0x00u8, 0x00u8);
+    sphere.set_reflectance(0.9f32);
     sphere2.set_color(0x00u8, 0xffu8, 0x00u8);
+    sphere2.set_reflectance(0.0f32);
+    sphere2.set_transparency(1.0f32);
+    sphere2.set_refractive_index(1.05f32);
+    floor.set_reflectance(0.0f32);
     floor.set_color(0x00u8, 0x00u8, 0xffu8);
     world.push_renderable(Box::new(sphere));
     world.push_renderable(Box::new(sphere2));
