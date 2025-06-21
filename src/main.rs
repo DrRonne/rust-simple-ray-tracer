@@ -61,6 +61,8 @@ fn main() -> Result<(), Error> {
     let mut clicked = false;
     let mut cursor_side = 0f32;
     let mut cursor_top = 0f32;
+    let mut yaw = 0f32;
+    let mut pitch = 0f32;
 
     event_loop.run(move |event: Event<()>, event_loop| {
         // Draw the current frame
@@ -185,8 +187,15 @@ fn main() -> Result<(), Error> {
                     let mut movesize = (forward * forward + to_side * to_side).sqrt().max(1.0f32);
                     camera.cframe.multiply_vector(to_side / movesize * CAMERA_MOVE_SPEED, 0f32, forward / movesize * CAMERA_MOVE_SPEED);
                     if clicked {
-                        camera.cframe.multiply_angles(cursor_top * CAMERA_ROTATE_SPEED, cursor_side * CAMERA_ROTATE_SPEED, 0f32);
+                        camera.reset_rotation();
+                        yaw += cursor_side * CAMERA_ROTATE_SPEED;
+                        pitch += cursor_top * CAMERA_ROTATE_SPEED;
+                        camera.cframe.multiply_angles(pitch, 0f32, 0f32);
+                        camera.cframe.multiply_angles(0f32, yaw, 0f32);
+                        cursor_side = 0f32;
+                        cursor_top = 0f32;
                     }
+                    camera.cframe.multiply_vector(to_side / movesize * CAMERA_MOVE_SPEED, 0f32, forward / movesize * CAMERA_MOVE_SPEED);
                     let elapsed = now.elapsed();
                     println!("Elapsed: {:.2?}", elapsed);
                     now = Instant::now();
