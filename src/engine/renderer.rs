@@ -6,7 +6,8 @@ use crate::engine::render::RenderObject;
 use crate::engine::camera::Camera;
 
 const render_src: &str = r#"
-    #define MAXIMUM_BOUNCES 5
+    #define MAXIMUM_BOUNCES 10
+    #define MAXIMUM_TRANSPARENCY_BOUNCES 5 // Maximum amount of transparent objects traversed to calculate shadow color.
     #define CORRECTION_FACTOR 0.01 // Correction factor to prevent ray from colliding with the object itself due to floating point precision issues.
     #define AIR_REFRACTIVE_INDEX 1.0 // Refractive index of air, used for calculating the refracted ray.
 
@@ -171,7 +172,7 @@ const render_src: &str = r#"
                                                 prop_size,
                                                 &t);
 
-        if (intersection_index >= 0)
+        if (*intersection_index >= 0)
         {
             float edge_pos[3] = { ray_cframe[0] - (ray_cframe[5] * t), ray_cframe[1] - (ray_cframe[8] * t), ray_cframe[2] - (ray_cframe[11] * t) };
             float normal[3] = { 0.0f, 0.0f, 0.0f };
@@ -187,31 +188,75 @@ const render_src: &str = r#"
             out_position[0] = edge_pos[0] + (out_normal[0] * CORRECTION_FACTOR);
             out_position[1] = edge_pos[1] + (out_normal[1] * CORRECTION_FACTOR);
             out_position[2] = edge_pos[2] + (out_normal[2] * CORRECTION_FACTOR);
+            float diffuseFactor;
+            if (transparency[*intersection_index] >= 0.01f)
+            {
+                diffuseFactor = 1.0f; // Transparent objects don't have a shade
+            }
+            else
+            {
+                diffuseFactor = fmax(out_normal[0] * (-directionlight_direction[0]) + out_normal[1] * (-directionlight_direction[1]) + out_normal[2] * (-directionlight_direction[2]), 0.0f);
+            }
+            float directional_diffuse_light_color[3] = { directionlight_color[0] * diffuseFactor / 0xff, directionlight_color[1] * diffuseFactor / 0xff, directionlight_color[2] * diffuseFactor / 0xff };
+            out_color[0] = (uchar) (((float) color[*intersection_index * 3]) * directional_diffuse_light_color[0]);
+            out_color[1] = (uchar) (((float) color[*intersection_index * 3 + 1]) * directional_diffuse_light_color[1]);
+            out_color[2] = (uchar) (((float) color[*intersection_index * 3 + 2]) * directional_diffuse_light_color[2]);
             float edge_to_dir_light[12] = { out_position[0], out_position[1], out_position[2],
                                             0.0, 0.0, directionlight_direction[0],
                                             0.0, 0.0, directionlight_direction[1],
                                             0.0, 0.0, directionlight_direction[2] };
-            float dl_t;
-            int dl_int_index = intersect_objects(object_cframe,
-                                                 object_amnt,
-                                                 edge_to_dir_light,
-                                                 object_props,
-                                                 prop_size,
-                                                 &dl_t);
-            if (dl_int_index < 0 || (dl_int_index == *intersection_index))
+            int shadow_intersections = 0;
+            while (shadow_intersections < MAXIMUM_TRANSPARENCY_BOUNCES)
             {
-                float diffuseFactor = fmax(out_normal[0] * (-directionlight_direction[0]) + out_normal[1] * (-directionlight_direction[1]) + out_normal[2] * (-directionlight_direction[2]), 0.0f);
-                float directional_diffuse_light_color[3] = { directionlight_color[0] * diffuseFactor / 0xff, directionlight_color[1] * diffuseFactor / 0xff, directionlight_color[2] * diffuseFactor / 0xff };
-
-                out_color[0] = (uchar) (((float) color[*intersection_index * 3]) * directional_diffuse_light_color[0]);
-                out_color[1] = (uchar) (((float) color[*intersection_index * 3 + 1]) * directional_diffuse_light_color[1]);
-                out_color[2] = (uchar) (((float) color[*intersection_index * 3 + 2]) * directional_diffuse_light_color[2]);
-                out_color[3] = 0xff;
-            } else {
-                out_color[0] = 0x00;
-                out_color[1] = 0x00;
-                out_color[2] = 0x00;
-                out_color[3] = 0xff;
+                float dl_t;
+                int dl_int_index = intersect_objects(object_cframe,
+                                                    object_amnt,
+                                                    edge_to_dir_light,
+                                                    object_props,
+                                                    prop_size,
+                                                    &dl_t);
+                if (dl_int_index < 0 || (dl_int_index == *intersection_index))
+                {
+                    break;
+                }
+                else if (transparency[dl_int_index] < 0.01f)
+                {
+                    out_color[0] = 0x00;
+                    out_color[1] = 0x00;
+                    out_color[2] = 0x00;
+                    out_color[3] = 0xff;
+                    break;
+                }
+                else
+                {
+                    uchar filtered_light_r = directionlight_color[0] * (transparency[dl_int_index] * 1.0f + (1.0f - transparency[dl_int_index]) * (color[dl_int_index * 3] / 255.0f));
+                    uchar filtered_light_g = directionlight_color[1] * (transparency[dl_int_index] * 1.0f + (1.0f - transparency[dl_int_index]) * (color[dl_int_index * 3 + 1] / 255.0f));
+                    uchar filtered_light_b = directionlight_color[2] * (transparency[dl_int_index] * 1.0f + (1.0f - transparency[dl_int_index]) * (color[dl_int_index * 3 + 2] / 255.0f));
+                    out_color[0] = (uchar) (((float) out_color[0]) * ((float) filtered_light_r / 255.0f));
+                    out_color[1] = (uchar) (((float) out_color[1]) * ((float) filtered_light_g / 255.0f));
+                    out_color[2] = (uchar) (((float) out_color[2]) * ((float) filtered_light_b / 255.0f));
+                    edge_to_dir_light[0] = edge_to_dir_light[0] - (directionlight_direction[0] * (dl_t + (CORRECTION_FACTOR * 2)));
+                    edge_to_dir_light[1] = edge_to_dir_light[1] - (directionlight_direction[1] * (dl_t + (CORRECTION_FACTOR * 2)));
+                    edge_to_dir_light[2] = edge_to_dir_light[2] - (directionlight_direction[2] * (dl_t + (CORRECTION_FACTOR * 2)));
+                    float dl_t2;
+                    int dl_int_index2 = intersect_objects(object_cframe,
+                                                          object_amnt,
+                                                          edge_to_dir_light,
+                                                          object_props,
+                                                          prop_size,
+                                                          &dl_t2);
+                    if (dl_int_index2 < 0 || (dl_int_index2 == dl_int_index))
+                    {
+                        edge_to_dir_light[0] = edge_to_dir_light[0] - (directionlight_direction[0] * (dl_t2 + (CORRECTION_FACTOR * 2)));
+                        edge_to_dir_light[1] = edge_to_dir_light[1] - (directionlight_direction[1] * (dl_t2 + (CORRECTION_FACTOR * 2)));
+                        edge_to_dir_light[2] = edge_to_dir_light[2] - (directionlight_direction[2] * (dl_t2 + (CORRECTION_FACTOR * 2)));
+                    }
+                    else
+                    {
+                        break;
+                    }
+                    shadow_intersections++;
+                }
             }
         } else {
             out_color[0] = 0x00;
@@ -416,7 +461,7 @@ const render_src: &str = r#"
                 continue;
             }
 
-            if (reflectance[intersection_index] > 0.01f) {
+            if (reflectance[intersection_index] > 0.01f && ray_stack[stack_ptr].surface_index == 0) {
                 calculate_reflected_ray(ray_stack[stack_ptr].cframe,
                                         result_normal,
                                         result_position,
@@ -440,7 +485,7 @@ const render_src: &str = r#"
                     ray_stack[stack_ptr + rays_inserted + 1].contribution = ray_stack[stack_ptr].contribution * (1.0f - reflectance[intersection_index]) * transparency[intersection_index];
                 }
                 else {
-                    ray_stack[stack_ptr + rays_inserted + 1].contribution = (1.0f - reflectance[intersection_index]) * transparency[intersection_index];
+                    ray_stack[stack_ptr + rays_inserted].contribution = (1.0f - reflectance[intersection_index]) * transparency[intersection_index];
                 }
                 ray_stack[stack_ptr + rays_inserted + 1].surface_index = ray_stack[stack_ptr].surface_index;
                 rays_inserted++;
