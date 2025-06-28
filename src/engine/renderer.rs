@@ -528,6 +528,8 @@ const render_src: &str = r#"
                          float camera_height,
                          float focal_length,
                          __constant float *object_cframe,
+                         __constant uint *merge_indices,
+                         __constant float *merge_radii,
                          unsigned int object_amnt,
                          __constant float *object_props,
                          uchar prop_size,
@@ -587,7 +589,7 @@ impl Renderer {
         Ok(())
     }
 
-    pub fn render_frame(&mut self, mut camera: Camera, mut render_objects: Vec<RenderObject>, directionlight_direction: Vec<f32>, directionlight_color: Vec<u8>) -> Result<Vec::<u8>, RendererError> {
+    pub fn render_frame(&mut self, mut camera: Camera, mut render_objects: Vec<RenderObject>, mut merge_indices: Vec<u32>, mut merge_radii: Vec<f32>, directionlight_direction: Vec<f32>, directionlight_color: Vec<u8>) -> Result<Vec::<u8>, RendererError> {
         let c_width = u16::try_from(self.width).map_err(|_| RendererError::DimensionsTooBigError)?;
         let c_height = u16::try_from(self.height).map_err(|_| RendererError::DimensionsTooBigError)?;
 
@@ -649,6 +651,18 @@ impl Renderer {
             .copy_host_slice(&camera.to_vec())
             .build().map_err(|e| RendererError::CreateBufferError(e))?;
 
+        let merge_indices_buffer = Buffer::builder().queue(self.pro_que.as_mut().ok_or(RendererError::RendererNotInitializedError)?.queue().clone())
+            .flags(MemFlags::new().read_write())
+            .len(merge_indices.len())
+            .copy_host_slice(&merge_indices)
+            .build().map_err(|e| RendererError::CreateBufferError(e))?;
+        
+        let merge_radii_buffer = Buffer::builder().queue(self.pro_que.as_mut().ok_or(RendererError::RendererNotInitializedError)?.queue().clone())
+            .flags(MemFlags::new().read_write())
+            .len(merge_radii.len())
+            .copy_host_slice(&merge_radii)
+            .build().map_err(|e| RendererError::CreateBufferError(e))?;
+
         let directionlight_direction_buffer = Buffer::builder().queue(self.pro_que.as_mut().ok_or(RendererError::RendererNotInitializedError)?.queue().clone())
             .flags(MemFlags::new().read_write())
             .len(3)
@@ -678,6 +692,8 @@ impl Renderer {
             .arg(camera_height)
             .arg(focal_length)
             .arg(cframe_buffer)
+            .arg(merge_indices_buffer)
+            .arg(merge_radii_buffer)
             .arg((cframe_vec.len() / 12) as u32)
             .arg(object_prop_buffer)
             .arg(prop_size)
