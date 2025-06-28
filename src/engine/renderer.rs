@@ -4,12 +4,18 @@ use ocl::{ProQue, Buffer, MemFlags};
 use crate::engine::error::RendererError;
 use crate::engine::render::RenderObject;
 use crate::engine::camera::Camera;
+use crate::engine::sphere_merge::SphereMerge;
 
 const render_src: &str = r#"
+    #pragma OPENCL EXTENSION cl_amd_printf : enable
+
     #define MAXIMUM_BOUNCES 10
     #define MAXIMUM_TRANSPARENCY_BOUNCES 5 // Maximum amount of transparent objects traversed to calculate shadow color.
     #define CORRECTION_FACTOR 0.01 // Correction factor to prevent ray from colliding with the object itself due to floating point precision issues.
     #define AIR_REFRACTIVE_INDEX 1.0 // Refractive index of air, used for calculating the refracted ray.
+    #define MAXIMUM_MERGES 6
+    #define MAXIMUM_MARCHING_STEPS 100 // Maximum amount of steps to take when marching the ray.
+    #define STEP_MULTIPLIER 0.1f // When the ray closes in on an object, this multiplier will be used to have smaller steps (or bigger if larger than 1.0f)
 
     typedef struct {
         float cframe[12];    // 48 bytes
@@ -81,6 +87,51 @@ const render_src: &str = r#"
         return true;
     }
 
+    float calculate_squared_distance_point_to_line(__constant float *point,
+                                                   float *ray)
+    {
+        float origin_point_diff[3] = { ray[0] - point[0],
+                                       ray[1] - point[1],
+                                       ray[2] - point[2] };
+        float dot = (origin_point_diff[0] * -ray[5]) + (origin_point_diff[1] * -ray[8]) + (origin_point_diff[2] * -ray[11]);
+        float projected_length[3] = { -ray[5] * dot,
+                                      -ray[8] * dot,
+                                      -ray[11] * dot };
+        float diff[3] = { origin_point_diff[0] - projected_length[0],
+                          origin_point_diff[1] - projected_length[1],
+                          origin_point_diff[2] - projected_length[2] };
+        return (diff[0] * diff[0]) + (diff[1] * diff[1]) + (diff[2] * diff[2]);
+    }
+
+    void find_point_on_line_at_distance_from_point(__constant float *point,
+                                                   float *ray,
+                                                   float distance,
+                                                   float *out_t)
+    {
+        float point_origin_diff[3] = { ray[0] - point[0],
+                                       ray[1] - point[1],
+                                       ray[2] - point[2] };
+        float a = (ray[5] * ray[5]) + (ray[8] * ray[8]) + (ray[11] * ray[11]);
+        float b = -2.0f * (ray[5] * point_origin_diff[0] + ray[8] * point_origin_diff[1] + ray[11] * point_origin_diff[2]);
+        float c = (point_origin_diff[0] * point_origin_diff[0]) + 
+                  (point_origin_diff[1] * point_origin_diff[1]) + 
+                  (point_origin_diff[2] * point_origin_diff[2]) - (distance * distance);
+        float t0, t1;
+        if (solveQuadratic(a, b, c, &t0, &t1)) {
+            if (t0 > 0 && t1 > 0) {
+                *out_t = min(t0, t1);
+            } else if (t0 > 0) {
+                *out_t = t0;
+            } else if (t1 > 0) {
+                *out_t = t1;
+            } else {
+                *out_t = -1.0f; // No solution
+            }
+        } else {
+            *out_t = -1.0f; // No solution
+        }
+    }
+
     void intersect_sphere(__constant float *sphere_cframe,
                           float sphere_radius,
                           float *ray_cframe,
@@ -112,28 +163,6 @@ const render_src: &str = r#"
         }
     }
 
-    int intersect_objects(__constant float* object_cframe,
-                          unsigned int object_amnt,
-                          float *ray_cframe,
-                          __constant float *object_props,
-                          uchar prop_size,
-                          float *out_t)
-    {
-        float t = 9999999;
-        int index_found = -1;
-        for (int i = 0; i < object_amnt; i++)
-        {
-            float local_t;
-            intersect_sphere(&object_cframe[i * 12], object_props[i * prop_size], ray_cframe, &local_t);
-            if (local_t > 0 && local_t < t) {
-                t = local_t;
-                index_found = i;
-            }
-        }
-        *out_t = t;
-        return index_found;
-    }
-
     void calculate_normal_vector(__constant float* object_cframe,
                                  int object_index,
                                  __constant float *object_props,
@@ -148,11 +177,153 @@ const render_src: &str = r#"
         out_normal[2] = normal[2] / normal_size;
     }
 
+    float calculate_squared_euclidean_distance(__constant float *a,
+                                               float *b)
+    {
+        float dx = a[0] - b[0];
+        float dy = a[1] - b[1];
+        float dz = a[2] - b[2];
+        return (dx * dx) + (dy * dy) + (dz * dz);
+    }
+
+    float squared_sphere_sdf(__constant float *sphere_cframe,
+                             float sphere_radius,
+                             float *point)
+    {
+        return calculate_squared_euclidean_distance(sphere_cframe, point) - (sphere_radius * sphere_radius);
+    }
+
+    float sphere_field_function(float sphere_radius,
+                                float squared_distance)
+    {
+        return (sphere_radius * sphere_radius) / squared_distance;
+    }
+
+    float calculate_manhattan_distance(__constant float *a,
+                                       float *b)
+    {
+        return fabs(a[0] - b[0]) + fabs(a[1] - b[1]) + fabs(a[2] - b[2]);
+    }
+
+    float intersect_object(__constant float* object_cframe,
+                           float object_props,
+                           float *ray_cframe,
+                           float *field_value,
+                           float *step_size)
+    {
+        float local_t = 0.0f;
+        float step_position[3] = { ray_cframe[0],
+                                   ray_cframe[1],
+                                   ray_cframe[2] };
+        *step_size = (calculate_manhattan_distance(object_cframe, step_position) - object_props) * 0.33f;
+        if (*step_size < 0)
+        {
+            return local_t; // Initial step size is negative, we're inside the body
+        }
+        float squared_distance = calculate_squared_euclidean_distance(object_cframe, ray_cframe); //LAST ADDED THIS
+        *field_value = sphere_field_function(object_props, squared_distance);
+        int steps_taken = 0;
+        for (int s = 0; s < MAXIMUM_MARCHING_STEPS; s++)
+        {
+            steps_taken++;
+            if (*field_value >= 1.0f || *step_size < 0.01f)
+            {
+                // Close enough to sphere or the step size became too small
+                break;
+            }
+            local_t += *step_size;
+            step_position[0] = ray_cframe[0] - (ray_cframe[5] * local_t);
+            step_position[1] = ray_cframe[1] - (ray_cframe[8] * local_t);
+            step_position[2] = ray_cframe[2] - (ray_cframe[11] * local_t);
+            squared_distance = calculate_squared_euclidean_distance(object_cframe, step_position);
+            float new_field_value = sphere_field_function(object_props, squared_distance);
+            if (new_field_value > *field_value)
+            {
+                // If the new field value is larger than the previous one, we are getting closer to the sphere
+                *field_value = new_field_value;
+            }
+            else
+            {
+                // If the new field value is smaller than the previous one, we are getting further away from the sphere
+                // We can stop marching here.
+                local_t = 9999;
+                break;
+            }
+            // Determine new step size
+            if (squared_distance > (object_props * object_props * 4.0f))
+            {
+                // If the squared distance is larger than the squared radius multiplied by 4,
+                // we are still very far away and should use the manhattan distance again to
+                // calculate the step size. It is safe to jump at least by the radius of the sphere.
+                *step_size = fmax((calculate_manhattan_distance(object_cframe, step_position) - object_props) * 0.33f, (object_props));
+            }
+            else
+            {
+                // If we are close enough, base the stepsize on the field value
+                *step_size = (-1.33f * object_props * *field_value + 1.33f * object_props) * STEP_MULTIPLIER;
+            }
+        }
+        return local_t;
+    }
+
+    int intersect_objects(__constant float* object_cframe,
+                          unsigned int object_amnt,
+                          __constant uint *merge_indices,
+                          __constant float *merge_radii,
+                          float *ray_cframe,
+                          __constant float *object_props,
+                          uchar prop_size,
+                          float *out_t,
+                          float *out_position,
+                          float *out_normal)
+    {
+        float t = 9999999;
+        int index_found = -1;
+        for (int i = 0; i < object_amnt; i++)
+        {
+            float local_t = 0.0f;
+            float squared_distance = calculate_squared_distance_point_to_line(&object_cframe[i * 12], ray_cframe);
+            // Use squared distance to avoid unnecessary square root calculation
+            if (squared_distance > (object_props[i * prop_size] + 0.01f) * (object_props[i * prop_size] + 0.01f) * 2.0f)
+            {
+                continue; // Skip this object if the ray is too far away
+            }
+            float field_value = 0.0f;
+            float step_size = 99999.0f;
+            local_t = intersect_object(&object_cframe[i * 12],
+                                       object_props[i * prop_size],
+                                       ray_cframe,
+                                       &field_value,
+                                       &step_size);
+            if (local_t < t && (field_value > 1.0f || step_size < 0.01f))
+            {
+                index_found = i;
+                t = local_t;
+            }
+        }
+        if (index_found >= 0)
+        {
+            out_position[0] = ray_cframe[0] - (ray_cframe[5] * t);
+            out_position[1] = ray_cframe[1] - (ray_cframe[8] * t);
+            out_position[2] = ray_cframe[2] - (ray_cframe[11] * t);
+            calculate_normal_vector(object_cframe,
+                                    index_found,
+                                    object_props,
+                                    prop_size,
+                                    out_position,
+                                    out_normal);
+            *out_t = t;
+        }
+        return index_found;
+    }
+
     void get_intersection_from_ray(uchar *out_color,
                                    int *intersection_index,
                                    float *out_normal,
                                    float *out_position,
                                    __constant float* object_cframe,
+                                   __constant uint *merge_indices,
+                                   __constant float *merge_radii,
                                    unsigned int object_amnt,
                                    float *ray_cframe,
                                    __constant float *object_props,
@@ -165,29 +336,26 @@ const render_src: &str = r#"
                                    __constant uchar *directionlight_color)
     {
         float t;
+        float edge_pos[3];
         *intersection_index = intersect_objects(object_cframe,
                                                 object_amnt,
+                                                merge_indices,
+                                                merge_radii,
                                                 ray_cframe,
                                                 object_props,
                                                 prop_size,
-                                                &t);
+                                                &t,
+                                                edge_pos,
+                                                out_normal);
 
         if (*intersection_index >= 0)
         {
-            float edge_pos[3] = { ray_cframe[0] - (ray_cframe[5] * t), ray_cframe[1] - (ray_cframe[8] * t), ray_cframe[2] - (ray_cframe[11] * t) };
-            float normal[3] = { 0.0f, 0.0f, 0.0f };
-            calculate_normal_vector(object_cframe,
-                                    *intersection_index,
-                                    object_props,
-                                    prop_size,
-                                    edge_pos,
-                                    out_normal);
             // The calculated edge_pos can be slightly inside inside the object, causing the ray to calculate the shadow to collide with the object itself.
             // This is due to floating point precision.
             // To combat this, take the starting point of the ray at a distance of "CORRECTION_FACTOR" more outwards of the object.
-            out_position[0] = edge_pos[0] + (out_normal[0] * CORRECTION_FACTOR);
-            out_position[1] = edge_pos[1] + (out_normal[1] * CORRECTION_FACTOR);
-            out_position[2] = edge_pos[2] + (out_normal[2] * CORRECTION_FACTOR);
+            out_position[0] = edge_pos[0];
+            out_position[1] = edge_pos[1];
+            out_position[2] = edge_pos[2];
             float diffuseFactor;
             if (transparency[*intersection_index] >= 0.01f)
             {
@@ -209,12 +377,18 @@ const render_src: &str = r#"
             while (shadow_intersections < MAXIMUM_TRANSPARENCY_BOUNCES)
             {
                 float dl_t;
+                float light_edge_pos[3];
+                float light_normal[3];
                 int dl_int_index = intersect_objects(object_cframe,
-                                                    object_amnt,
-                                                    edge_to_dir_light,
-                                                    object_props,
-                                                    prop_size,
-                                                    &dl_t);
+                                                     object_amnt,
+                                                     merge_indices,
+                                                     merge_radii,
+                                                     edge_to_dir_light,
+                                                     object_props,
+                                                     prop_size,
+                                                     &dl_t,
+                                                     light_edge_pos,
+                                                     light_normal);
                 if (dl_int_index < 0 || (dl_int_index == *intersection_index))
                 {
                     break;
@@ -238,24 +412,31 @@ const render_src: &str = r#"
                     edge_to_dir_light[0] = edge_to_dir_light[0] - (directionlight_direction[0] * (dl_t + (CORRECTION_FACTOR * 2)));
                     edge_to_dir_light[1] = edge_to_dir_light[1] - (directionlight_direction[1] * (dl_t + (CORRECTION_FACTOR * 2)));
                     edge_to_dir_light[2] = edge_to_dir_light[2] - (directionlight_direction[2] * (dl_t + (CORRECTION_FACTOR * 2)));
-                    float dl_t2;
-                    int dl_int_index2 = intersect_objects(object_cframe,
-                                                          object_amnt,
-                                                          edge_to_dir_light,
-                                                          object_props,
-                                                          prop_size,
-                                                          &dl_t2);
-                    if (dl_int_index2 < 0 || (dl_int_index2 == dl_int_index))
+                    float field_value = 0.0f;
+                    float step_size = 99999.0f;
+                    float light_edge_pos[3];
+                    float light_normal[3];
+                    float other_side_ray[12] = { edge_to_dir_light[0] - (directionlight_direction[0] * object_props[dl_int_index * prop_size] * 3),
+                                                edge_to_dir_light[1] - (directionlight_direction[1] * object_props[dl_int_index * prop_size] * 3),
+                                                edge_to_dir_light[2] - (directionlight_direction[2] * object_props[dl_int_index * prop_size] * 3),
+                                                0.0f, 0.0f, -directionlight_direction[0],
+                                                0.0f, 0.0f, -directionlight_direction[1],
+                                                0.0f, 0.0f, -directionlight_direction[2] };
+                    float dl_t2 = intersect_object(&object_cframe[dl_int_index * 12],
+                                                   object_props[dl_int_index * prop_size],
+                                                   other_side_ray,
+                                                   &field_value,
+                                                   &step_size);
+                    if (field_value > 1.0f || step_size < 0.01f)
                     {
-                        edge_to_dir_light[0] = edge_to_dir_light[0] - (directionlight_direction[0] * (dl_t2 + (CORRECTION_FACTOR * 2)));
-                        edge_to_dir_light[1] = edge_to_dir_light[1] - (directionlight_direction[1] * (dl_t2 + (CORRECTION_FACTOR * 2)));
-                        edge_to_dir_light[2] = edge_to_dir_light[2] - (directionlight_direction[2] * (dl_t2 + (CORRECTION_FACTOR * 2)));
+                        edge_to_dir_light[0] = other_side_ray[0] - (other_side_ray[5] * (dl_t2 - CORRECTION_FACTOR * 5));
+                        edge_to_dir_light[1] = other_side_ray[1] - (other_side_ray[8] * (dl_t2 - CORRECTION_FACTOR * 5));
+                        edge_to_dir_light[2] = other_side_ray[2] - (other_side_ray[11] * (dl_t2 - CORRECTION_FACTOR * 5));
                     }
                     else
                     {
                         break;
                     }
-                    shadow_intersections++;
                 }
             }
         } else {
@@ -365,9 +546,9 @@ const render_src: &str = r#"
     {
         float radius = object_props[intersection_index * prop_size];
         float internal_ray[12];
-        float corrected_position[3] = { position[0] - (normal[0] * CORRECTION_FACTOR * 2),
-                                        position[1] - (normal[1] * CORRECTION_FACTOR * 2),
-                                        position[2] - (normal[2] * CORRECTION_FACTOR * 2) };
+        float corrected_position[3] = { position[0] - (normal[0] * CORRECTION_FACTOR * 5),
+                                        position[1] - (normal[1] * CORRECTION_FACTOR * 5),
+                                        position[2] - (normal[2] * CORRECTION_FACTOR * 5) };
         calculate_refracted_ray(normal, incoming_ray, corrected_position, internal_ray, AIR_REFRACTIVE_INDEX, n1);
         float local_t = 0.0f;
         intersect_sphere(&object_cframe[intersection_index * 12], radius, internal_ray, &local_t);
@@ -392,6 +573,8 @@ const render_src: &str = r#"
     void render_pixel(__global uchar *output_buffer,
                       __constant float* object_cframe,
                       unsigned int object_amnt,
+                      __constant uint *merge_indices,
+                      __constant float *merge_radii,
                       __constant float *camera_cframe,
                       float *ray_rotation_matrix,
                       __constant float *object_props,
@@ -434,7 +617,7 @@ const render_src: &str = r#"
         ray_stack[stack_ptr].contribution = 1.0f;
         ray_stack[stack_ptr].surface_index = 0;
 
-        while (stack_ptr < MAXIMUM_BOUNCES || ray_stack[stack_ptr].surface_index == -1) {
+        while (stack_ptr < MAXIMUM_BOUNCES && ray_stack[stack_ptr].surface_index != -1) {
             float result_normal[3] = { 0.0f, 0.0f, 0.0f };
             float result_position[3] = { 0.0f, 0.0f, 0.0f };
             int intersection_index = -1;
@@ -444,6 +627,8 @@ const render_src: &str = r#"
                                       result_normal,
                                       result_position,
                                       object_cframe,
+                                      merge_indices,
+                                      merge_radii,
                                       object_amnt,
                                       ray_stack[stack_ptr].cframe,
                                       object_props,
@@ -551,7 +736,7 @@ const render_src: &str = r#"
         setup_rotation_from_angles(alpha, beta, 0.0f, cam_ray_rotation);
         float cam_ray[] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
         matrix_multiplication(&camera[3], cam_ray_rotation, cam_ray, 3);
-        render_pixel(output_buffer, object_cframe, object_amnt, camera, cam_ray, object_props, prop_size, color, reflectance, transparency, refractive_index, directionlight_direction, directionlight_color);
+        render_pixel(output_buffer, object_cframe, object_amnt, merge_indices, merge_radii, camera, cam_ray, object_props, prop_size, color, reflectance, transparency, refractive_index, directionlight_direction, directionlight_color);
     }
 "#;
 
