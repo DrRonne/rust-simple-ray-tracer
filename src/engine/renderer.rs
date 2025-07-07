@@ -15,7 +15,8 @@ const render_src: &str = r#"
     #define AIR_REFRACTIVE_INDEX 1.0 // Refractive index of air, used for calculating the refracted ray.
     #define MAXIMUM_MERGES 6
     #define MAXIMUM_MARCHING_STEPS 100 // Maximum amount of steps to take when marching the ray.
-    #define STEP_MULTIPLIER 0.1f // When the ray closes in on an object, this multiplier will be used to have smaller steps (or bigger if larger than 1.0f)
+    #define STEP_MARGIN 0.01f // How close the ray needs to get for it to count as an intersection
+    #define STEP_MULTIPLIER 0.8f // When the ray closes in on an object, this multiplier will be used to have smaller steps (or bigger if larger than 1.0f)
 
     typedef struct {
         float cframe[12];    // 48 bytes
@@ -129,6 +130,96 @@ const render_src: &str = r#"
             }
         } else {
             *out_t = -1.0f; // No solution
+        }
+    }
+
+    float smooth_min(float a,
+                     float b,
+                     float k)
+    {
+        float h = fmax(k - fabs(a - b), 0.0f);
+        return fmin(a, b) - (h * h * 0.25f / k);
+    }
+
+    float sphere_sdf(__constant float *sphere_cframe,
+                     float sphere_radius,
+                     float *position)
+    {
+        float diff[3] = { sphere_cframe[0] - position[0],
+                          sphere_cframe[1] - position[1],
+                          sphere_cframe[2] - position[2] };
+        return sqrt((diff[0] * diff[0]) + (diff[1] * diff[1]) + (diff[2] * diff[2])) - sphere_radius;
+    }
+
+    float merge_sphere_sdf(__constant float *object_cframe,
+                           int index,
+                           __constant float *object_props,
+                           uchar prop_size,
+                           __constant uint *merge_indices,
+                           __constant float *merge_radii,
+                           float *position)
+    {
+        float sdf = sphere_sdf(&object_cframe[index * 12], object_props[index * prop_size], position);
+        for (int m = 0; m < MAXIMUM_MERGES; m++)
+        {
+            int local_index = index * MAXIMUM_MERGES + m;
+            uint m_index = merge_indices[local_index];
+            if (merge_radii[local_index] < 0.01f)
+                break;
+            float other_sdf = sphere_sdf(&object_cframe[m_index * 12], object_props[m_index * prop_size], position);
+            sdf = smooth_min(other_sdf, sdf, merge_radii[local_index]);
+        }
+        return sdf;
+    }
+
+    void calculate_sdf_normal(
+        float *position,
+        __constant float *object_cframe,
+        int index,
+        __constant float *object_props,
+        uchar prop_size,
+        __constant uint *merge_indices,
+        __constant float *merge_radii,
+        float *out_normal
+    ) {
+        float epsilon = 0.001f;
+        float dx[3] = {epsilon, 0.0f, 0.0f};
+        float dy[3] = {0.0f, epsilon, 0.0f};
+        float dz[3] = {0.0f, 0.0f, epsilon};
+        float p[3];
+
+        // X
+        p[0] = position[0] + epsilon; p[1] = position[1]; p[2] = position[2];
+        float sdf_x1 = merge_sphere_sdf(object_cframe, index, object_props, prop_size, merge_indices, merge_radii, p);
+        p[0] = position[0] - epsilon;
+        float sdf_x0 = merge_sphere_sdf(object_cframe, index, object_props, prop_size, merge_indices, merge_radii, p);
+
+        // Y
+        p[0] = position[0]; p[1] = position[1] + epsilon; p[2] = position[2];
+        float sdf_y1 = merge_sphere_sdf(object_cframe, index, object_props, prop_size, merge_indices, merge_radii, p);
+        p[1] = position[1] - epsilon;
+        float sdf_y0 = merge_sphere_sdf(object_cframe, index, object_props, prop_size, merge_indices, merge_radii, p);
+
+        // Z
+        p[1] = position[1]; p[2] = position[2] + epsilon;
+        float sdf_z1 = merge_sphere_sdf(object_cframe, index, object_props, prop_size, merge_indices, merge_radii, p);
+        p[2] = position[2] - epsilon;
+        float sdf_z0 = merge_sphere_sdf(object_cframe, index, object_props, prop_size, merge_indices, merge_radii, p);
+
+        out_normal[0] = (sdf_x1 - sdf_x0) / (2.0f * epsilon);
+        out_normal[1] = (sdf_y1 - sdf_y0) / (2.0f * epsilon);
+        out_normal[2] = (sdf_z1 - sdf_z0) / (2.0f * epsilon);
+
+        // Normalize
+        float len = sqrt(out_normal[0]*out_normal[0] + out_normal[1]*out_normal[1] + out_normal[2]*out_normal[2]);
+        if (len > 1e-6f) {
+            out_normal[0] /= len;
+            out_normal[1] /= len;
+            out_normal[2] /= len;
+        } else {
+            out_normal[0] = 0.0f;
+            out_normal[1] = 0.0f;
+            out_normal[2] = 1.0f;
         }
     }
 
@@ -266,85 +357,35 @@ const render_src: &str = r#"
                            float *ray_cframe,
                            __constant uint *merge_indices,
                            __constant float *merge_radii,
-                           float *field_value,
                            float *step_size)
     {
         float local_t = 0.0f;
         float step_position[3] = { ray_cframe[0],
                                    ray_cframe[1],
                                    ray_cframe[2] };
-        *step_size = (calculate_manhattan_distance(&object_cframe[index * 12], step_position) - object_props[index * prop_size]) * 0.33f;
+        *step_size = merge_sphere_sdf(object_cframe, index, object_props, prop_size, merge_indices, merge_radii, step_position) * STEP_MULTIPLIER;
         if (*step_size < 0)
         {
-            return local_t; // Initial step size is negative, we're inside the body
+            // inside sphere, stop
+            return 99999.0f;
         }
-        float squared_distance = calculate_squared_euclidean_distance(&object_cframe[index * 12], ray_cframe);
-        *field_value = sphere_field_function(object_props[index * prop_size], squared_distance);
-        for (int m = 0; m < MAXIMUM_MERGES; m++)
+        int steps = 0;
+        for (int i = 0; i < MAXIMUM_MARCHING_STEPS; i++)
         {
-            if (merge_radii[m] < 0.01f)
-                break;
-            float squared_merge_distance = calculate_squared_euclidean_distance(&object_cframe[merge_indices[m] * 12], ray_cframe);
-            float merge_field_value = sphere_field_function(object_props[merge_indices[m] * prop_size], squared_merge_distance);
-            // printf("current field value: %f, merging with: %d, adding field value: %f, total field value: %f", *field_value, merge_indices[m], merge_field_value, *field_value + merge_field_value);
-            *field_value += merge_field_value;
-        }
-        int steps_taken = 0;
-        for (int s = 0; s < MAXIMUM_MARCHING_STEPS; s++)
-        {
-            steps_taken++;
-            if (*field_value >= 1.0f || *step_size < 0.01f)
+            steps++;
+            if (*step_size < 0)
+                printf("step size is %f", *step_size);
+            if (fabs(*step_size) <= STEP_MARGIN)
             {
-                // Close enough to sphere or the step size became too small
                 break;
             }
+            if (*step_size < 0)
+                printf("step size is %f", *step_size);
             local_t += *step_size;
-            step_position[0] = ray_cframe[0] - (ray_cframe[5] * local_t);
-            step_position[1] = ray_cframe[1] - (ray_cframe[8] * local_t);
-            step_position[2] = ray_cframe[2] - (ray_cframe[11] * local_t);
-            squared_distance = calculate_squared_euclidean_distance(&object_cframe[index * 12], step_position);
-            float new_field_value = sphere_field_function(object_props[index * prop_size], squared_distance);
-            for (int m = 0; m < MAXIMUM_MERGES; m++)
-            {
-                if (merge_radii[m] < 0.01f)
-                    break;
-                float squared_merge_distance = calculate_squared_euclidean_distance(&object_cframe[merge_indices[m] * 12], step_position);
-                float merge_field_value = sphere_field_function(object_props[merge_indices[m] * prop_size], squared_merge_distance);
-                // printf("current field value: %f, merging with: %d, adding field value: %f, total field value: %f, merge position: %f %f %f, merge radius:", *field_value, merge_indices[m], merge_field_value, *field_value + merge_field_value, object_cframe[merge_indices[m] * 12], object_cframe[merge_indices[m] * 12 + 1], object_cframe[merge_indices[m] * 12 + 2], object_props[merge_indices[m] * prop_size]);
-                // if (new_field_value < 1.0f && new_field_value + merge_field_value >= 1.0f && merge_field_value >= 0.5)
-                // {
-                //     printf("we have a winner! %f %f %f, merge position: %f %f %f, merge radius: %f, merge distance %f, other distance %f", new_field_value, merge_field_value, new_field_value + merge_field_value, object_cframe[merge_indices[m] * 12], object_cframe[merge_indices[m] * 12 + 1], object_cframe[merge_indices[m] * 12 + 2], object_props[merge_indices[m] * prop_size], squared_merge_distance, squared_distance);
-                //     printf("position: %f %f %f, dist1 %f, dist2 %f", step_position[0], step_position[1], step_position[2], sqrt(squared_distance), sqrt(squared_merge_distance));
-                // }
-                new_field_value += merge_field_value;
-            }
-            // if (new_field_value > *field_value)
-            // {
-                // If the new field value is larger than the previous one, we are getting closer to the sphere
-                *field_value = new_field_value;
-            // }
-            // else
-            // {
-                // If the new field value is smaller than the previous one, we are getting further away from the sphere
-                // We can stop marching here.
-                // local_t = 9999;
-                // break;
-            // }
-            // Determine new step size
-            if (squared_distance > (object_props[index * prop_size] * object_props[index * prop_size] * 4.0f))
-            {
-                // If the squared distance is larger than the squared radius multiplied by 4,
-                // we are still very far away and should use the manhattan distance again to
-                // calculate the step size. It is safe to jump at least by the radius of the sphere.
-                *step_size = fmax((calculate_manhattan_distance(&object_cframe[index * 12], step_position) - object_props[index * prop_size]) * 0.33f, (object_props[index * prop_size]));
-            }
-            else
-            {
-                // If we are close enough, base the stepsize on the field value
-                // *step_size = 0.1f;
-                *step_size = (-1.33f * object_props[index * prop_size] * *field_value + 1.33f * object_props[index * prop_size]) * STEP_MULTIPLIER;
-            }
-            // *step_size = fmax(*step_size, 0.01f);
+            step_position[0] = ray_cframe[0] - (local_t * ray_cframe[5]);
+            step_position[1] = ray_cframe[1] - (local_t * ray_cframe[8]);
+            step_position[2] = ray_cframe[2] - (local_t * ray_cframe[11]);
+            *step_size = merge_sphere_sdf(object_cframe, index, object_props, prop_size, merge_indices, merge_radii, step_position) * STEP_MULTIPLIER;
         }
         return local_t;
     }
@@ -391,18 +432,16 @@ const render_src: &str = r#"
                 }
                 // continue; // Skip this object if the ray is too far away
             }
-            float field_value = 0.0f;
             float step_size = 99999.0f;
             local_t = intersect_object(object_cframe,
                                        object_props,
                                        i,
                                        prop_size,
                                        ray_cframe,
-                                       &merge_indices[i * MAXIMUM_MERGES],
-                                       &merge_radii[i * MAXIMUM_MERGES],
-                                       &field_value,
+                                       merge_indices,
+                                       merge_radii,
                                        &step_size);
-            if (local_t < t && (field_value > 1.0f || step_size < 0.01f))
+            if (local_t < t && step_size < STEP_MARGIN)
             {
                 index_found = i;
                 t = local_t;
@@ -413,22 +452,14 @@ const render_src: &str = r#"
             out_position[0] = ray_cframe[0] - (ray_cframe[5] * t);
             out_position[1] = ray_cframe[1] - (ray_cframe[8] * t);
             out_position[2] = ray_cframe[2] - (ray_cframe[11] * t);
-            // if (index_found == object_amnt -2)
-            //     printf("distance to center: %f", sqrt(calculate_squared_euclidean_distance(&object_cframe[index_found * 12], out_position)));
-            calculate_metaball_normal(out_position,
-                                   object_cframe,
-                                   object_props,
-                                   prop_size,
-                                   index_found,
-                                   merge_indices,
-                                   merge_radii,
-                                   out_normal);
-            // calculate_normal_vector(object_cframe,
-            //                         index_found,
-            //                         object_props,
-            //                         prop_size,
-            //                         out_position,
-            //                         out_normal);
+            calculate_sdf_normal(out_position,
+                                 object_cframe,
+                                 index_found,
+                                 object_props,
+                                 prop_size,
+                                 merge_indices,
+                                 merge_radii,
+                                 out_normal);
             *out_t = t;
         }
         return index_found;
@@ -470,9 +501,9 @@ const render_src: &str = r#"
             // The calculated edge_pos can be slightly inside inside the object, causing the ray to calculate the shadow to collide with the object itself.
             // This is due to floating point precision.
             // To combat this, take the starting point of the ray at a distance of "CORRECTION_FACTOR" more outwards of the object.
-            out_position[0] = edge_pos[0];
-            out_position[1] = edge_pos[1];
-            out_position[2] = edge_pos[2];
+            out_position[0] = edge_pos[0] + out_normal[0] * CORRECTION_FACTOR;
+            out_position[1] = edge_pos[1] + out_normal[1] * CORRECTION_FACTOR;
+            out_position[2] = edge_pos[2] + out_normal[2] * CORRECTION_FACTOR;
             float diffuseFactor;
             if (transparency[*intersection_index] >= 0.01f)
             {
@@ -529,7 +560,6 @@ const render_src: &str = r#"
                     edge_to_dir_light[0] = edge_to_dir_light[0] - (directionlight_direction[0] * (dl_t + (CORRECTION_FACTOR * 2)));
                     edge_to_dir_light[1] = edge_to_dir_light[1] - (directionlight_direction[1] * (dl_t + (CORRECTION_FACTOR * 2)));
                     edge_to_dir_light[2] = edge_to_dir_light[2] - (directionlight_direction[2] * (dl_t + (CORRECTION_FACTOR * 2)));
-                    float field_value = 0.0f;
                     float step_size = 99999.0f;
                     float light_edge_pos[3];
                     float light_normal[3];
@@ -546,9 +576,8 @@ const render_src: &str = r#"
                                                    other_side_ray,
                                                    merge_indices,
                                                    merge_radii,
-                                                   &field_value,
                                                    &step_size);
-                    if (field_value > 1.0f || step_size < 0.01f)
+                    if (step_size < STEP_MARGIN)
                     {
                         edge_to_dir_light[0] = other_side_ray[0] - (other_side_ray[5] * (dl_t2 - CORRECTION_FACTOR * 5));
                         edge_to_dir_light[1] = other_side_ray[1] - (other_side_ray[8] * (dl_t2 - CORRECTION_FACTOR * 5));
@@ -681,9 +710,9 @@ const render_src: &str = r#"
                                 prop_size,
                                 internal_edge_pos,
                                 internal_normal);
-        internal_edge_pos[0] += (internal_normal[0] * CORRECTION_FACTOR);
-        internal_edge_pos[1] += (internal_normal[1] * CORRECTION_FACTOR);
-        internal_edge_pos[2] += (internal_normal[2] * CORRECTION_FACTOR);
+        internal_edge_pos[0] += (internal_normal[0] * CORRECTION_FACTOR * 5);
+        internal_edge_pos[1] += (internal_normal[1] * CORRECTION_FACTOR * 5);
+        internal_edge_pos[2] += (internal_normal[2] * CORRECTION_FACTOR * 5);
         if (local_t > 0.0f)
         {
             float inversed_internal_normal[3] = { -internal_normal[0], -internal_normal[1], -internal_normal[2] };

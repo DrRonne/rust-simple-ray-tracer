@@ -34,20 +34,24 @@ fn main() -> Result<(), Error> {
     let mut sphere = Sphere::new(10f32);
     let mut sphere2 = Sphere::new(10f32);
     let mut sphere3 = Sphere::new(10f32);
-    let mut sphere4 = Sphere::new(10f32);
+    let mut sphere4 = Sphere::new(12f32);
     let mut sphere5 = Sphere::new(10f32);
     let mut sphere6 = Sphere::new(5f32);
     let mut sphere7 = Sphere::new(5f32);
+    let mut sphere8 = Sphere::new(5f32);
     let mut sphere_merge = MergeModel::new();
     let mut floor = Sphere::new(30f32);
+    let mut floor2 = Sphere::new(30f32);
     sphere.set_position(0f32, 0f32, -40f32);
     sphere2.set_position(0f32, 0f32, 40f32);
     sphere3.set_position(-20f32, 10f32, 0f32);
     sphere4.set_position(20f32, 10f32, 0f32);
     sphere5.set_position(30f32, 20f32, 10f32);
     sphere6.set_position(-35f32, 25f32, 10f32);
-    sphere7.set_position(-25f32, 25f32, 20f32);
+    sphere7.set_position(-20f32, 20f32, 25f32);
+    sphere8.set_position(10f32, 10f32, 0f32);
     floor.set_position(10f32, -32f32, -5f32);
+    floor2.set_position(40f32, -32f32, -25f32);
     sphere.set_color(0xffu8, 0x00u8, 0x00u8);
     sphere.set_reflectance(0.9f32);
     sphere2.set_color(0x00u8, 0xffu8, 0x00u8);
@@ -58,16 +62,22 @@ fn main() -> Result<(), Error> {
     sphere3.set_transparency(0.9f32);
     sphere3.set_refractive_index(1.0f32);
     sphere4.set_color(0x00u8, 0xffu8, 0xffu8);
+    sphere8.set_color(0x00u8, 0x00u8, 0xffu8);
+    // sphere4.set_transparency(0.5f32);
     sphere5.set_color(0xffu8, 0xffu8, 0x00u8);
+    // sphere5.set_color(0x00u8, 0xffu8, 0xffu8);
     sphere6.set_color(0x80u8, 0xffu8, 0x80u8);
     sphere7.set_color(0xffu8, 0x80u8, 0x80u8);
     sphere7.set_transparency(0.5f32);
     sphere7.set_refractive_index(1.0f32);
     // floor.set_reflectance(0.0f32);
     floor.set_color(0xffu8, 0xffu8, 0xffu8);
+    floor2.set_color(0xffu8, 0xffu8, 0xffu8);
     sphere_merge.add_sphere(Box::new(sphere4));
     sphere_merge.add_sphere(Box::new(sphere5));
-    sphere_merge.add_merge(0, 1, 5f32);
+    sphere_merge.add_sphere(Box::new(sphere8));
+    sphere_merge.add_merge(0, 1, 10f32);
+    sphere_merge.add_merge(0, 2, 3f32);
     world.push_renderable(Box::new(sphere));
     world.push_renderable(Box::new(sphere2));
     world.push_renderable(Box::new(sphere3));
@@ -75,6 +85,13 @@ fn main() -> Result<(), Error> {
     world.push_renderable(Box::new(sphere6));
     world.push_renderable(Box::new(sphere7));
     world.push_renderable(Box::new(floor));
+    world.push_renderable(Box::new(floor2));
+    // for i in 0..1000 {
+    //     let mut s = Sphere::new(10f32);
+    //     s.set_color(0xff, 0xff, 0x00);
+    //     s.set_position(i as f32 * 10f32, 0f32, -50f32);
+    //     world.push_renderable(Box::new(s));
+    // }
     let size = LogicalSize::new(WIDTH as f64, HEIGHT as f64);
     let window = WindowBuilder::new()
         .with_title("Simple ray tracer")
