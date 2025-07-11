@@ -466,14 +466,10 @@ const render_src: &str = r#"
         for (int i = 0; i < MAXIMUM_MARCHING_STEPS; i++)
         {
             steps++;
-            if (*step_size < 0)
-                printf("step size is %f", *step_size);
             if (fabs(*step_size) <= STEP_MARGIN)
             {
                 break;
             }
-            if (*step_size < 0)
-                printf("step size is %f", *step_size);
             local_t += *step_size;
             step_position[0] = ray_cframe[0] - (local_t * ray_cframe[5]);
             step_position[1] = ray_cframe[1] - (local_t * ray_cframe[8]);
@@ -632,7 +628,7 @@ const render_src: &str = r#"
             out_position[1] = edge_pos[1] + out_normal[1] * CORRECTION_FACTOR;
             out_position[2] = edge_pos[2] + out_normal[2] * CORRECTION_FACTOR;
             float diffuseFactor;
-            if (transparency[*intersection_index] >= 0.01f)
+            if (*out_transparency >= 0.01f)
             {
                 diffuseFactor = 1.0f; // Transparent objects don't have a shade
             }
@@ -655,6 +651,9 @@ const render_src: &str = r#"
                 float light_edge_pos[3];
                 float light_normal[3];
                 uchar shadow_color[3];
+                float shadow_transparency;
+                float shadow_reflectance;
+                float shadow_refractive_index;
                 int dl_int_index = intersect_objects(object_cframe,
                                                      object_amnt,
                                                      merge_indices,
@@ -670,14 +669,14 @@ const render_src: &str = r#"
                                                      light_edge_pos,
                                                      light_normal,
                                                      shadow_color,
-                                                     out_transparency,
-                                                     out_reflectance,
-                                                     out_refractive_index);
+                                                     &shadow_transparency,
+                                                     &shadow_reflectance,
+                                                     &shadow_refractive_index);
                 if (dl_int_index < 0 || (dl_int_index == *intersection_index))
                 {
                     break;
                 }
-                else if (*out_transparency < 0.01f)
+                else if (shadow_transparency < 0.01f)
                 {
                     out_color[0] = 0x00;
                     out_color[1] = 0x00;
@@ -687,9 +686,9 @@ const render_src: &str = r#"
                 }
                 else
                 {
-                    uchar filtered_light_r = directionlight_color[0] * (*out_transparency * 1.0f + (1.0f - *out_transparency) * (shadow_color[0] / 255.0f));
-                    uchar filtered_light_g = directionlight_color[1] * (*out_transparency * 1.0f + (1.0f - *out_transparency) * (shadow_color[1] / 255.0f));
-                    uchar filtered_light_b = directionlight_color[2] * (*out_transparency * 1.0f + (1.0f - *out_transparency) * (shadow_color[2] / 255.0f));
+                    uchar filtered_light_r = directionlight_color[0] * (shadow_transparency * 1.0f + (1.0f - shadow_transparency) * (shadow_color[0] / 255.0f));
+                    uchar filtered_light_g = directionlight_color[1] * (shadow_transparency * 1.0f + (1.0f - shadow_transparency) * (shadow_color[1] / 255.0f));
+                    uchar filtered_light_b = directionlight_color[2] * (shadow_transparency * 1.0f + (1.0f - shadow_transparency) * (shadow_color[2] / 255.0f));
                     out_color[0] = (uchar) (((float) out_color[0]) * ((float) filtered_light_r / 255.0f));
                     out_color[1] = (uchar) (((float) out_color[1]) * ((float) filtered_light_g / 255.0f));
                     out_color[2] = (uchar) (((float) out_color[2]) * ((float) filtered_light_b / 255.0f));
@@ -828,29 +827,46 @@ const render_src: &str = r#"
                                     __constant float *object_cframe,
                                     __constant float* object_props,
                                     uchar prop_size,
+                                    __constant uint *merge_indices,
+                                    __constant float *merge_radii,
                                     int intersection_index)
     {
         float radius = object_props[intersection_index * prop_size];
         float internal_ray[12];
-        float corrected_position[3] = { position[0] - (normal[0] * CORRECTION_FACTOR * 5),
-                                        position[1] - (normal[1] * CORRECTION_FACTOR * 5),
-                                        position[2] - (normal[2] * CORRECTION_FACTOR * 5) };
-        calculate_refracted_ray(normal, incoming_ray, corrected_position, internal_ray, AIR_REFRACTIVE_INDEX, n1);
-        float local_t = 0.0f;
-        intersect_sphere(&object_cframe[intersection_index * 12], radius, internal_ray, &local_t);
+        calculate_refracted_ray(normal, incoming_ray, position, internal_ray, AIR_REFRACTIVE_INDEX, n1);
+        internal_ray[0] = internal_ray[0] - internal_ray[5] * radius * 4;
+        internal_ray[1] = internal_ray[1] - internal_ray[8] * radius * 4;
+        internal_ray[2] = internal_ray[2] - internal_ray[11] * radius * 4;
+        internal_ray[5] = -internal_ray[5];
+        internal_ray[8] = -internal_ray[8];
+        internal_ray[11] = -internal_ray[11];
+        float step_size;
+        float local_t = intersect_object(object_cframe,
+                                         object_props,
+                                         intersection_index,
+                                         prop_size,
+                                         internal_ray,
+                                         merge_indices,
+                                         merge_radii,
+                                         &step_size);
         float internal_edge_pos[3] = { internal_ray[0] - (internal_ray[5] * local_t), internal_ray[1] - (internal_ray[8] * local_t), internal_ray[2] - (internal_ray[11] * local_t) };
         float internal_normal[3] = { 0.0f, 0.0f, 0.0f };
-        calculate_normal_vector(object_cframe,
-                                intersection_index,
-                                object_props,
-                                prop_size,
-                                internal_edge_pos,
-                                internal_normal);
+        calculate_sdf_normal(internal_edge_pos,
+                             object_cframe,
+                             intersection_index,
+                             object_props,
+                             prop_size,
+                             merge_indices,
+                             merge_radii,
+                             internal_normal);
         internal_edge_pos[0] += (internal_normal[0] * CORRECTION_FACTOR * 5);
         internal_edge_pos[1] += (internal_normal[1] * CORRECTION_FACTOR * 5);
         internal_edge_pos[2] += (internal_normal[2] * CORRECTION_FACTOR * 5);
         if (local_t > 0.0f)
         {
+            internal_ray[5] = -internal_ray[5];
+            internal_ray[8] = -internal_ray[8];
+            internal_ray[11] = -internal_ray[11];
             float inversed_internal_normal[3] = { -internal_normal[0], -internal_normal[1], -internal_normal[2] };
             calculate_refracted_ray(inversed_internal_normal, internal_ray, internal_edge_pos, outgoing_ray, n1, AIR_REFRACTIVE_INDEX);
         }
@@ -931,6 +947,8 @@ const render_src: &str = r#"
                                       &calc_transparency,
                                       &calc_reflectance,
                                       &calc_refractive_index);
+            // if (calc_transparency > 0.1f && calc_transparency < 0.5f)
+            //     printf("hooray!");
             if (intersection_index < 0) {
                 // No intersection found, just continue to the next ray in the stack
                 ray_stack[stack_ptr].surface_index = -1;
@@ -948,28 +966,30 @@ const render_src: &str = r#"
                 rays_inserted++;
             }
 
-            if (transparency[intersection_index] > 0.01f) {
+            if (calc_transparency > 0.01f) {
                 calculate_transparency_ray(result_normal,
                                            ray_stack[stack_ptr].cframe,
                                            result_position,
                                            ray_stack[stack_ptr + rays_inserted + 1].cframe,
-                                           refractive_index[intersection_index],
+                                           calc_refractive_index,
                                            object_cframe,
                                            object_props,
                                            prop_size,
+                                           merge_indices,
+                                           merge_radii,
                                            intersection_index);
                 if (ray_stack[stack_ptr].surface_index == 0) {
-                    ray_stack[stack_ptr + rays_inserted + 1].contribution = ray_stack[stack_ptr].contribution * (1.0f - calc_reflectance) * transparency[intersection_index];
+                    ray_stack[stack_ptr + rays_inserted + 1].contribution = ray_stack[stack_ptr].contribution * (1.0f - calc_reflectance) * calc_transparency;
                 }
                 else {
-                    ray_stack[stack_ptr + rays_inserted].contribution = (1.0f - calc_reflectance) * transparency[intersection_index];
+                    ray_stack[stack_ptr + rays_inserted].contribution = (1.0f - calc_reflectance) * calc_transparency;
                 }
                 ray_stack[stack_ptr + rays_inserted + 1].surface_index = ray_stack[stack_ptr].surface_index;
                 rays_inserted++;
             }
 
             // Add the color contribution of the current intersection
-            ray_stack[stack_ptr].contribution *= (1.0f - calc_reflectance) * (1.0f - transparency[intersection_index]);
+            ray_stack[stack_ptr].contribution *= (1.0f - calc_reflectance) * (1.0f - calc_transparency);
             stack_ptr++;
         }
         
