@@ -49,7 +49,7 @@ fn main() -> Result<(), Error> {
     sphere5.set_position(30f32, 20f32, 10f32);
     sphere6.set_position(-35f32, 25f32, 10f32);
     sphere7.set_position(-20f32, 20f32, 25f32);
-    sphere8.set_position(10f32, 10f32, 0f32);
+    sphere8.set_position(5f32, 10f32, 0f32);
     floor.set_position(10f32, -32f32, -5f32);
     floor2.set_position(40f32, -32f32, -25f32);
     sphere.set_color(0xffu8, 0x00u8, 0x00u8);
@@ -63,9 +63,11 @@ fn main() -> Result<(), Error> {
     sphere3.set_refractive_index(1.0f32);
     sphere4.set_color(0x00u8, 0xffu8, 0xffu8);
     sphere8.set_color(0x00u8, 0x00u8, 0xffu8);
+    sphere8.set_reflectance(0.5f32);
     // sphere4.set_transparency(0.5f32);
     sphere5.set_color(0xffu8, 0xffu8, 0x00u8);
-    // sphere5.set_color(0x00u8, 0xffu8, 0xffu8);
+    sphere5.set_transparency(0.5f32);
+    sphere5.set_refractive_index(1.05f32);
     sphere6.set_color(0x80u8, 0xffu8, 0x80u8);
     sphere7.set_color(0xffu8, 0x80u8, 0x80u8);
     sphere7.set_transparency(0.5f32);
@@ -76,8 +78,8 @@ fn main() -> Result<(), Error> {
     sphere_merge.add_sphere(Box::new(sphere4));
     sphere_merge.add_sphere(Box::new(sphere5));
     sphere_merge.add_sphere(Box::new(sphere8));
-    sphere_merge.add_merge(0, 1, 10f32);
-    sphere_merge.add_merge(0, 2, 3f32);
+    sphere_merge.add_merge(0, 1, 5f32);
+    sphere_merge.add_merge(0, 2, 1f32);
     world.push_renderable(Box::new(sphere));
     world.push_renderable(Box::new(sphere2));
     world.push_renderable(Box::new(sphere3));
