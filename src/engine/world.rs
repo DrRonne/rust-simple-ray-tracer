@@ -40,12 +40,11 @@ impl World {
                             merge_indices.push((current_count + merge.get_sphere2()) as u32);
                             merge_radii.push(merge.get_inverted_radius());
                             added_merges += 1;
+                        } else if merge.get_sphere2() == i as u32 {
+                            merge_indices.push((current_count + merge.get_sphere1()) as u32);
+                            merge_radii.push(merge.get_inverted_radius());
+                            added_merges += 1;
                         }
-                        // } else if merge.get_sphere2() == i as u32 {
-                        //     merge_indices.push((current_count + merge.get_sphere2()) as u32);
-                        //     merge_radii.push(merge.get_inverted_radius());
-                        //     added_merges += 1;
-                        // }
                     }
                 }
                 for _ in added_merges..MAX_MERGES {
