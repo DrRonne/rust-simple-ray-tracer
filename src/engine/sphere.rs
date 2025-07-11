@@ -1,7 +1,6 @@
 use crate::engine::cframe::{CFrame, Positionable};
 use crate::engine::render::{Renderable, RenderObject, RenderType};
 
-#[derive(Default)]
 pub struct Sphere {
     cframe: CFrame,
     radius: f32,
@@ -17,6 +16,19 @@ impl Sphere {
             radius,
             ..Default::default()
          }
+    }
+}
+
+impl Default for Sphere {
+    fn default() -> Self {
+        Self {
+            cframe: CFrame::default(),
+            radius: 0.0,
+            color: vec![0, 0, 0],
+            reflectance: 0.0,
+            transparency: 0.0,
+            refractive_index: 1.0,
+        }
     }
 }
 
