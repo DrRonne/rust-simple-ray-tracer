@@ -2,6 +2,7 @@ use thiserror::Error;
 use ocl::Error as OclError;
 
 #[derive(Error, Debug)]
+#[allow(dead_code)]
 pub enum RendererError {
     #[error("Renderer not initialized!")]
     DimensionsTooBigError,

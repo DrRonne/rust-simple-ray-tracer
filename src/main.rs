@@ -1,10 +1,9 @@
 use pixels::{Error, Pixels, SurfaceTexture};
 use winit::dpi::LogicalSize;
-use winit::event::{Event, WindowEvent, DeviceEvent, MouseButton, StartCause, KeyEvent, ElementState};
+use winit::event::{Event, WindowEvent, DeviceEvent, MouseButton, KeyEvent, ElementState};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::event_loop::{ControlFlow, EventLoop};
+use winit::event_loop::EventLoop;
 use winit::window::WindowBuilder;
-use winit_input_helper::WinitInputHelper;
 use log::error;
 use error_iter::ErrorIter as _;
 use std::time::Instant;
@@ -27,7 +26,6 @@ fn main() -> Result<(), Error> {
     let mut renderer = Renderer::new(WIDTH, HEIGHT);
     renderer.init().expect("Failed to initialize renderer");
     let event_loop = EventLoop::new().unwrap();
-    let mut input = WinitInputHelper::new();
     let mut now = Instant::now();
     let mut camera = Camera::new(90f32, 0.1f32);
     let mut world = World::new();
@@ -116,7 +114,7 @@ fn main() -> Result<(), Error> {
     let mut yaw = 0f32;
     let mut pitch = 0f32;
 
-    event_loop.run(move |event: Event<()>, event_loop| {
+    let _ = event_loop.run(move |event: Event<()>, event_loop| {
         // Draw the current frame
         if let Event::DeviceEvent { ref event, .. } = event {
             match event {
@@ -229,14 +227,14 @@ fn main() -> Result<(), Error> {
                     }
                 }
                 WindowEvent::MouseInput {
-                    device_id, state, button
+                    device_id: _, state, button
                 } => {
                     if button == MouseButton::Left {
                         clicked = state == ElementState::Pressed;
                     }
                 }
                 WindowEvent::RedrawRequested => {
-                    let mut movesize = (forward * forward + to_side * to_side).sqrt().max(1.0f32);
+                    let movesize = (forward * forward + to_side * to_side).sqrt().max(1.0f32);
                     if clicked {
                         camera.reset_rotation();
                         yaw += cursor_side * CAMERA_ROTATE_SPEED;
@@ -254,9 +252,8 @@ fn main() -> Result<(), Error> {
                     let directionlight_direction = world.get_direction_light_direction_vec();
                     let directionlight_color = world.get_direction_light_color_vec();
                     let mut vec = renderer.render_frame(camera, render_objects, merge_indices, merge_radii, directionlight_direction, directionlight_color).expect("failed to render frame");
-                    let mut frame = pixels.frame_mut();
+                    let frame = pixels.frame_mut();
                     frame.copy_from_slice(&mut vec[..]);
-                    // world.draw(pixels.frame_mut());
                     if let Err(err) = pixels.render() {
                         log_error("pixels.render", err);
                         event_loop.exit();

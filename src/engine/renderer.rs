@@ -4,9 +4,8 @@ use ocl::{ProQue, Buffer, MemFlags};
 use crate::engine::error::RendererError;
 use crate::engine::render::RenderObject;
 use crate::engine::camera::Camera;
-use crate::engine::sphere_merge::SphereMerge;
 
-const render_src: &str = r#"
+const RENDER_SRC: &str = r#"
     #pragma OPENCL EXTENSION cl_amd_printf : enable
 
     #define MAXIMUM_BOUNCES 10
@@ -1073,7 +1072,7 @@ impl Renderer {
 
     pub fn init(&mut self) -> Result<(), RendererError> {
         self.pro_que = Some(ProQue::builder()
-            .src(render_src)
+            .src(RENDER_SRC)
             .dims(self.width * self.height)
             .build().map_err(|e| RendererError::KernelBuildError(e))?);
         
@@ -1086,7 +1085,7 @@ impl Renderer {
         Ok(())
     }
 
-    pub fn render_frame(&mut self, mut camera: Camera, mut render_objects: Vec<RenderObject>, mut merge_indices: Vec<u32>, mut merge_radii: Vec<f32>, directionlight_direction: Vec<f32>, directionlight_color: Vec<u8>) -> Result<Vec::<u8>, RendererError> {
+    pub fn render_frame(&mut self, mut camera: Camera, mut render_objects: Vec<RenderObject>, merge_indices: Vec<u32>, merge_radii: Vec<f32>, directionlight_direction: Vec<f32>, directionlight_color: Vec<u8>) -> Result<Vec::<u8>, RendererError> {
         let c_width = u16::try_from(self.width).map_err(|_| RendererError::DimensionsTooBigError)?;
         let c_height = u16::try_from(self.height).map_err(|_| RendererError::DimensionsTooBigError)?;
 

@@ -1,5 +1,5 @@
 use crate::engine::render::{Renderable, RenderObject};
-use crate::engine::sphere_merge::{MergeModel, SphereMerge};
+use crate::engine::sphere_merge::MergeModel;
 use crate::engine::lights::directionlight::DirectionLight;
 
 const MAX_MERGES: u32 = 6;

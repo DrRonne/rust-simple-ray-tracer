@@ -1,5 +1,4 @@
-use crate::engine::render::{Renderable, RenderObject, RenderType};
-use crate::engine::sphere::Sphere;
+use crate::engine::render::{Renderable, RenderObject};
 
 #[derive(Default)]
 pub struct MergeModel {
