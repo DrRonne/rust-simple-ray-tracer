@@ -1,4 +1,4 @@
-use crate::engine::cframe::CFrame;
+use crate::engine::util::cframe::CFrame;
 
 pub trait Renderable {
     fn get_render_object(&mut self) -> RenderObject;

@@ -13,7 +13,7 @@ use crate::engine::camera::Camera;
 use crate::engine::world::World;
 use crate::engine::sphere::Sphere;
 use crate::engine::sphere_merge::MergeModel;
-use crate::engine::cframe::Positionable;
+use crate::engine::util::cframe::Positionable;
 use crate::engine::render::Renderable;
 
 const WIDTH: u32 = 1280;

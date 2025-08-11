@@ -1,4 +1,4 @@
-use crate::engine::cframe::CFrame;
+use crate::engine::util::cframe::CFrame;
 
 #[derive(Default, Copy, Clone)]
 pub struct Camera {
