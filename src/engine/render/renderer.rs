@@ -1,7 +1,7 @@
 
 extern crate ocl;
 use ocl::{ProQue, Buffer, MemFlags};
-use crate::engine::error::RendererError;
+use crate::engine::util::error::RendererError;
 use crate::engine::render::render::RenderObject;
 use crate::engine::camera::Camera;
 

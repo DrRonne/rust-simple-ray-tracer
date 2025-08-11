@@ -1,4 +1,3 @@
-pub mod error;
 pub mod camera;
 pub mod sphere;
 pub mod world;
