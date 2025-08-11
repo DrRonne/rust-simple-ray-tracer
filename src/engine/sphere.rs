@@ -1,5 +1,5 @@
 use crate::engine::util::cframe::{CFrame, Positionable};
-use crate::engine::render::{Renderable, RenderObject, RenderType};
+use crate::engine::render::render::{Renderable, RenderObject, RenderType};
 
 pub struct Sphere {
     cframe: CFrame,

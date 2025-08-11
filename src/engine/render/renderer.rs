@@ -2,8 +2,10 @@
 extern crate ocl;
 use ocl::{ProQue, Buffer, MemFlags};
 use crate::engine::error::RendererError;
-use crate::engine::render::RenderObject;
+use crate::engine::render::render::RenderObject;
 use crate::engine::camera::Camera;
+
+use crate::engine::util::octree::octree::Octree;
 
 const RENDER_SRC: &str = r#"
     #pragma OPENCL EXTENSION cl_amd_printf : enable
@@ -24,6 +26,11 @@ const RENDER_SRC: &str = r#"
         int surface_index;   // 4 bytes
         uchar color[4];      // 4 bytes
     } RayStackEntry;
+
+    typedef struct {
+        uint subnode_indices[8];
+        uint indices[8];
+    } OctreeNode;
 
     void cframe_multiply_vector(__constant float *cframe,
                                 __private float *pos,
@@ -1034,7 +1041,8 @@ const RENDER_SRC: &str = r#"
                          __constant float *transparency,
                          __constant float *refractive_index,
                          __constant float *directionlight_direction,
-                         __constant uchar *directionlight_color) {
+                         __constant uchar *directionlight_color,
+                         __constant OctreeNode* nodes) {
         int x = get_global_id(0) % width;
         int y = get_global_id(0) / width;
         float cam_x = - (camera_width / 2) + (((float) x / (float) width) * camera_width);
@@ -1171,6 +1179,13 @@ impl Renderer {
             .copy_host_slice(&directionlight_color)
             .build().map_err(|e| RendererError::CreateBufferError(e))?;
 
+        let mut octree = Octree::new(10f32, 10u32, 10u32, 10u32, (0f32, 0f32, 0f32));
+        let octree_buffer = Buffer::builder().queue(self.pro_que.as_mut().ok_or(RendererError::RendererNotInitializedError)?.queue().clone())
+            .flags(MemFlags::new().read_write())
+            .len(octree.get_nodes().full_len())
+            .copy_host_slice(octree.get_nodes().get_items())
+            .build().map_err(|e| RendererError::CreateBufferError(e))?;
+
         let focal_length = camera.get_focal_length();
         let horizontal_fov = camera.get_fov();
         let horizontal_fov_rad = horizontal_fov / 180.0 * std::f32::consts::PI;
@@ -1199,6 +1214,7 @@ impl Renderer {
             .arg(refractive_index_buffer)
             .arg(directionlight_direction_buffer)
             .arg(directionlight_color_buffer)
+            .arg(octree_buffer)
             .build().map_err(|e| RendererError::AddArgumentsError(e))?;
 
         unsafe { kernel.enq().map_err(|e| RendererError::ExecuteKernelError(e))?; }

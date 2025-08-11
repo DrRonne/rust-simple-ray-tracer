@@ -8,13 +8,13 @@ use log::error;
 use error_iter::ErrorIter as _;
 use std::time::Instant;
 mod engine;
-use crate::engine::renderer::Renderer;
+use crate::engine::render::renderer::Renderer;
 use crate::engine::camera::Camera;
 use crate::engine::world::World;
 use crate::engine::sphere::Sphere;
 use crate::engine::sphere_merge::MergeModel;
 use crate::engine::util::cframe::Positionable;
-use crate::engine::render::Renderable;
+use crate::engine::render::render::Renderable;
 
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;

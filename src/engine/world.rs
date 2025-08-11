@@ -1,20 +1,24 @@
-use crate::engine::render::{Renderable, RenderObject};
+use crate::engine::render::render::{Renderable, RenderObject};
 use crate::engine::sphere_merge::MergeModel;
 use crate::engine::lights::directionlight::DirectionLight;
+use crate::engine::util::octree::octree::Octree;
 
 const MAX_MERGES: u32 = 6;
 
-#[derive(Default)]
 pub struct World {
     objects: Vec<Box<dyn Renderable>>,
     merge_models: Vec<MergeModel>,
     directionlight: DirectionLight,
+    octree: Octree,
 }
 
 impl World {
     pub fn new() -> Self {
         Self {
-            ..Default::default()
+            objects: Vec::new(),
+            merge_models: Vec::new(),
+            directionlight: DirectionLight::default(),
+            octree: Octree::new(64f32, 3, 3, 3, (-64f32, -64f32, -64f32)),
          }
     }
 
