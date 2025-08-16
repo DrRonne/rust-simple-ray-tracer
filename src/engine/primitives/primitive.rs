@@ -4,6 +4,8 @@ use ocl::OclPrm;
 use crate::engine::primitives::sphere::SphereData;
 use crate::engine::util::cframe::{CFrame, Positionable};
 
+const MAX_MERGES: usize = 6;
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -57,6 +59,8 @@ pub struct Primitive {
     reflectance: f32,
     color: [u8; 3],
     cframe: CFrame,
+    merge_indices: [u32; MAX_MERGES],
+    merge_radii: [f32; MAX_MERGES],
     _pad_common: f32,
 
     // Type-specific fields
@@ -72,6 +76,9 @@ impl Primitive {
             reflectance: 0.0f32,
             color: [0xFF, 0xFF, 0xFF],
             cframe: CFrame::default(),
+            render_radius: radius,
+            merge_indices: [0, 0, 0, 0, 0, 0],
+            merge_radii: [0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32],
             _pad_common: 0.0,
             payload: PrimitivePayload { sphere_data: SphereData::new(radius) },
         }
@@ -91,6 +98,71 @@ impl Primitive {
 
     pub fn set_reflectance(&mut self, reflectance: f32) {
         self.reflectance = reflectance;
+    }
+
+    pub fn set_render_radius(&mut self, render_radius: f32) {
+        self.render_radius = render_radius;
+    }
+
+    pub fn set_radius(&mut self, radius: f32) {
+        if (self.kind != Kind::SPHERE) {
+            println!("WARNING: Attempted to set radius on a primitive that is not a sphere!");
+        } else {
+            // SAFETY: if statement checked for correct structure in the union
+            unsafe {
+                self.payload.sphere_data.radius = radius;
+            }
+        }
+    }
+
+    pub fn add_merge(&mut self, merge_index: u32, merge_radius: f32) {
+        if merge_radius < 0.01f32 {
+            println!("WARNING: Attempted to add a merge with a radius smaller than 0.01!");
+            return;
+        }
+        for i in 0..MAX_MERGES {
+            if self.merge_radii[i] < 0.01f32 {
+                self.merge_radii[i] = merge_radius;
+                self.merge_indices[i] = merge_index;
+                println!("merge indices: {:?}", self.merge_indices);
+                println!("merge radii: {:?}", self.merge_radii);
+                return;
+            }
+        }
+        println!("WARNING: Attempted to add more merges than the maximum allowed merges!");
+    }
+
+    fn shift_used_indices_left(&mut self) {
+        // For further effiency, we like to keep all used indices in the first elements
+        // This could be compared to bubble sort, which is rather inefficient, but for now I predict that this function will not be used that often anyway.
+        // PERFORMANCE IMPROVEMENT POSSIBLE
+        for _ in 0..MAX_MERGES {
+            for j in 0..MAX_MERGES-1 {
+                if self.merge_radii[j] <= 0.01f32 && self.merge_radii[j + 1] > 0.01f32 {
+                    self.merge_radii[j] = self.merge_radii[j + 1];
+                    self.merge_indices[j] = self.merge_indices[j + 1];
+                    self.merge_radii[j + 1] = 0.0f32;
+                    self.merge_indices[j + 1] = 0;
+                }
+            }
+        }
+    }
+
+    pub fn remove_merge(&mut self, merge_index: u32) {
+        let mut removed = false;
+        for i in 0..MAX_MERGES {
+            if self.merge_indices[i] == merge_index {
+                self.merge_radii[i] = 0.0f32;
+                self.merge_indices[i] = 0;
+                removed = true;
+                break;
+            }
+        }
+        if !removed {
+            println!("WARNING: Attempted to remove merge that did not exist!");
+        } else {
+            self.shift_used_indices_left();
+        }
     }
 }
 

@@ -12,7 +12,6 @@ use crate::engine::render::renderer::Renderer;
 use crate::engine::camera::Camera;
 use crate::engine::world::World;
 use crate::engine::primitives::primitive::Primitive;
-use crate::engine::sphere_merge::MergeModel;
 use crate::engine::util::cframe::Positionable;
 
 const WIDTH: u32 = 1280;
@@ -36,7 +35,6 @@ fn main() -> Result<(), Error> {
     let mut sphere6 = Primitive::new_sphere(5f32);
     let mut sphere7 = Primitive::new_sphere(5f32);
     let mut sphere8 = Primitive::new_sphere(5f32);
-    let mut sphere_merge = MergeModel::new();
     let mut floor = Primitive::new_sphere(30f32);
     let mut floor2 = Primitive::new_sphere(30f32);
     sphere.set_position(0f32, 0f32, -40f32);
@@ -72,18 +70,14 @@ fn main() -> Result<(), Error> {
     // floor.set_reflectance(0.0f32);
     floor.set_color([0xffu8, 0xffu8, 0xffu8]);
     floor2.set_color([0xffu8, 0xffu8, 0xffu8]);
-    sphere_merge.add_primitive(sphere4);
-    sphere_merge.add_primitive(sphere5);
-    sphere_merge.add_primitive(sphere8);
-    world.push_primitive(sphere4);
-    world.push_primitive(sphere5);
-    world.push_primitive(sphere8);
-    sphere_merge.add_merge(0, 1, 5f32);
-    sphere_merge.add_merge(0, 2, 1f32);
+    let s4 = world.push_primitive(sphere4);
+    let s5 = world.push_primitive(sphere5);
+    let s8 = world.push_primitive(sphere8);
+    world.merge_primitives(s4, s5, 5f32);
+    world.merge_primitives(s4, s8, 1f32);
     world.push_primitive(sphere);
     world.push_primitive(sphere2);
     world.push_primitive(sphere3);
-    world.push_merge_model(sphere_merge);
     world.push_primitive(sphere6);
     world.push_primitive(sphere7);
     world.push_primitive(floor);
@@ -250,12 +244,10 @@ fn main() -> Result<(), Error> {
                     let elapsed = now.elapsed();
                     println!("Elapsed: {:.2?}", elapsed);
                     now = Instant::now();
-                    // let (render_objects, merge_indices, merge_radii) = world.get_render_objects_and_merges();
-                    let (merge_indices, merge_radii) = world.get_merges();
                     let directionlight_direction = world.get_direction_light_direction_vec();
                     let directionlight_color = world.get_direction_light_color_vec();
                     let primitives = world.get_primitives();
-                    let mut vec = renderer.render_frame(camera, merge_indices, merge_radii, directionlight_direction, directionlight_color, primitives).expect("failed to render frame");
+                    let mut vec = renderer.render_frame(camera, directionlight_direction, directionlight_color, primitives).expect("failed to render frame");
                     let frame = pixels.frame_mut();
                     frame.copy_from_slice(&mut vec[..]);
                     if let Err(err) = pixels.render() {
