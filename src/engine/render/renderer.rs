@@ -2,10 +2,10 @@
 extern crate ocl;
 use ocl::{ProQue, Buffer, MemFlags};
 use crate::engine::util::error::RendererError;
-use crate::engine::render::render::RenderObject;
 use crate::engine::camera::Camera;
 
 use crate::engine::util::octree::octree::Octree;
+use crate::engine::primitives::primitive::Primitive;
 
 const RENDER_SRC: &str = r#"
     #pragma OPENCL EXTENSION cl_amd_printf : enable
@@ -31,6 +31,46 @@ const RENDER_SRC: &str = r#"
         uint subnode_indices[8];
         uint indices[8];
     } OctreeNode;
+
+    typedef enum {
+        SPHERE = 0,
+    } Kind; 
+
+    typedef struct {
+        float x;
+        float y;
+        float z;
+        float r00;
+        float r01;
+        float r02;
+        float r10;
+        float r11;
+        float r12;
+        float r20;
+        float r21;
+        float r22;
+    } CFrame;
+
+    typedef struct {
+        float radius;
+        float _pad[0];
+    } SphereData;
+
+    typedef union {
+        SphereData sphere_data;
+        float raw[1];
+    } PrimitivePayload;
+
+    typedef struct {
+        Kind kind;
+        float transparency;
+        float refractive_index;
+        float reflectance;
+        uchar color[3];
+        CFrame cframe;
+        float _pad_common;
+        PrimitivePayload payload;
+    } Primitive;
 
     void cframe_multiply_vector(__constant float *cframe,
                                 __private float *pos,
@@ -95,12 +135,12 @@ const RENDER_SRC: &str = r#"
         return true;
     }
 
-    float calculate_squared_distance_point_to_line(__constant float *point,
+    float calculate_squared_distance_point_to_line(CFrame point,
                                                    float *ray)
     {
-        float origin_point_diff[3] = { ray[0] - point[0],
-                                       ray[1] - point[1],
-                                       ray[2] - point[2] };
+        float origin_point_diff[3] = { ray[0] - point.x,
+                                       ray[1] - point.y,
+                                       ray[2] - point.z };
         float dot = (origin_point_diff[0] * -ray[5]) + (origin_point_diff[1] * -ray[8]) + (origin_point_diff[2] * -ray[11]);
         float projected_length[3] = { -ray[5] * dot,
                                       -ray[8] * dot,
@@ -119,32 +159,32 @@ const RENDER_SRC: &str = r#"
         return fmin(a, b) - (h * h * 0.25f / k);
     }
 
-    float sphere_sdf(__constant float *sphere_cframe,
+    float sphere_sdf(CFrame sphere_cframe,
                      float sphere_radius,
                      float *position)
     {
-        float diff[3] = { sphere_cframe[0] - position[0],
-                          sphere_cframe[1] - position[1],
-                          sphere_cframe[2] - position[2] };
+        float diff[3] = { sphere_cframe.x - position[0],
+                          sphere_cframe.y - position[1],
+                          sphere_cframe.z - position[2] };
         return sqrt((diff[0] * diff[0]) + (diff[1] * diff[1]) + (diff[2] * diff[2])) - sphere_radius;
     }
 
-    float merge_sphere_sdf(__constant float *object_cframe,
+    float merge_sphere_sdf(__constant Primitive* primitives,
                            int index,
-                           __constant float *object_props,
-                           uchar prop_size,
-                           __constant uint *merge_indices,
-                           __constant float *merge_radii,
+                           __constant uint* merge_indices,
+                           __constant float* merge_radii,
                            float *position)
     {
-        float sdf = sphere_sdf(&object_cframe[index * 12], object_props[index * prop_size], position);
+        Primitive p = primitives[index];
+        float sdf = sphere_sdf(p.cframe, p.payload.sphere_data.radius, position);
         for (int m = 0; m < MAXIMUM_MERGES; m++)
         {
             int local_index = index * MAXIMUM_MERGES + m;
             uint m_index = merge_indices[local_index];
             if (merge_radii[local_index] < 0.01f)
                 break;
-            float other_sdf = sphere_sdf(&object_cframe[m_index * 12], object_props[m_index * prop_size], position);
+            Primitive p2 = primitives[m_index];
+            float other_sdf = sphere_sdf(p2.cframe, p2.payload.sphere_data.radius, position);
             sdf = smooth_min(other_sdf, sdf, merge_radii[local_index]);
         }
         return sdf;
@@ -152,12 +192,10 @@ const RENDER_SRC: &str = r#"
 
     void calculate_sdf_normal(
         float *position,
-        __constant float *object_cframe,
+        __constant Primitive* primitives,
         int index,
-        __constant float *object_props,
-        uchar prop_size,
-        __constant uint *merge_indices,
-        __constant float *merge_radii,
+        __constant uint* merge_indices,
+        __constant float* merge_radii,
         float *out_normal
     ) {
         float epsilon = 0.001f;
@@ -168,21 +206,21 @@ const RENDER_SRC: &str = r#"
 
         // X
         p[0] = position[0] + epsilon; p[1] = position[1]; p[2] = position[2];
-        float sdf_x1 = merge_sphere_sdf(object_cframe, index, object_props, prop_size, merge_indices, merge_radii, p);
+        float sdf_x1 = merge_sphere_sdf(primitives, index, merge_indices, merge_radii, p);
         p[0] = position[0] - epsilon;
-        float sdf_x0 = merge_sphere_sdf(object_cframe, index, object_props, prop_size, merge_indices, merge_radii, p);
+        float sdf_x0 = merge_sphere_sdf(primitives, index, merge_indices, merge_radii, p);
 
         // Y
         p[0] = position[0]; p[1] = position[1] + epsilon; p[2] = position[2];
-        float sdf_y1 = merge_sphere_sdf(object_cframe, index, object_props, prop_size, merge_indices, merge_radii, p);
+        float sdf_y1 = merge_sphere_sdf(primitives, index, merge_indices, merge_radii, p);
         p[1] = position[1] - epsilon;
-        float sdf_y0 = merge_sphere_sdf(object_cframe, index, object_props, prop_size, merge_indices, merge_radii, p);
+        float sdf_y0 = merge_sphere_sdf(primitives, index, merge_indices, merge_radii, p);
 
         // Z
         p[1] = position[1]; p[2] = position[2] + epsilon;
-        float sdf_z1 = merge_sphere_sdf(object_cframe, index, object_props, prop_size, merge_indices, merge_radii, p);
+        float sdf_z1 = merge_sphere_sdf(primitives, index, merge_indices, merge_radii, p);
         p[2] = position[2] - epsilon;
-        float sdf_z0 = merge_sphere_sdf(object_cframe, index, object_props, prop_size, merge_indices, merge_radii, p);
+        float sdf_z0 = merge_sphere_sdf(primitives, index, merge_indices, merge_radii, p);
 
         out_normal[0] = (sdf_x1 - sdf_x0) / (2.0f * epsilon);
         out_normal[1] = (sdf_y1 - sdf_y0) / (2.0f * epsilon);
@@ -246,17 +284,11 @@ const RENDER_SRC: &str = r#"
         }
     }
 
-    void calculate_params_at_intersection(__constant float* object_cframe,
-                                          __constant float *object_props,
+    void calculate_params_at_intersection(__constant Primitive* primitives,
                                           int index,
-                                          uchar prop_size,
                                           float *position,
                                           __constant uint *merge_indices,
                                           __constant float *merge_radii,
-                                          __constant uchar *color,
-                                          __constant float *reflectance,
-                                          __constant float *transparency,
-                                          __constant float *refractive_index,
                                           uchar *out_color,
                                           float *out_transparency,
                                           float *out_reflectance,
@@ -272,8 +304,9 @@ const RENDER_SRC: &str = r#"
             if (blend_objects[i] < 0)
                 break;
             total_blends++;
-            float sdf = sphere_sdf(&object_cframe[blend_objects[i] * 12], object_props[blend_objects[i] * prop_size], position);
-            weights[i] = fmax(exp(-sdf / object_props[blend_objects[i] * prop_size]), 0.0f);
+            Primitive p = primitives[blend_objects[i]];
+            float sdf = sphere_sdf(p.cframe, p.payload.sphere_data.radius, position);
+            weights[i] = fmax(exp(-sdf / p.payload.sphere_data.radius), 0.0f);
             sum += weights[i];
         }
 
@@ -293,19 +326,18 @@ const RENDER_SRC: &str = r#"
         // Blend
         for (int m = 0; m < total_blends; m++) {
             int m_index = blend_objects[m];
-            out_color[0] += (uchar)(color[m_index * 3] * weights[m]);
-            out_color[1] += (uchar)(color[m_index * 3 + 1] * weights[m]);
-            out_color[2] += (uchar)(color[m_index * 3 + 2] * weights[m]);
-            *out_transparency += transparency[m_index] * weights[m];
-            *out_reflectance += reflectance[m_index] * weights[m];
-            *out_refractive_index += refractive_index[m_index] * weights[m];
+            Primitive pm = primitives[m_index];
+            out_color[0] += (uchar)(pm.color[0] * weights[m]);
+            out_color[1] += (uchar)(pm.color[1] * weights[m]);
+            out_color[2] += (uchar)(pm.color[2] * weights[m]);
+            *out_transparency += pm.transparency * weights[m];
+            *out_reflectance += pm.reflectance * weights[m];
+            *out_refractive_index += pm.refractive_index * weights[m];
         }
     }
 
-    float intersect_object(__constant float* object_cframe,
-                           __constant float *object_props,
+    float intersect_object(__constant Primitive* primitives,
                            int index,
-                           uchar prop_size,
                            float *ray_cframe,
                            __constant uint *merge_indices,
                            __constant float *merge_radii,
@@ -315,7 +347,7 @@ const RENDER_SRC: &str = r#"
         float step_position[3] = { ray_cframe[0],
                                    ray_cframe[1],
                                    ray_cframe[2] };
-        *step_size = merge_sphere_sdf(object_cframe, index, object_props, prop_size, merge_indices, merge_radii, step_position) * STEP_MULTIPLIER;
+        *step_size = merge_sphere_sdf(primitives, index, merge_indices, merge_radii, step_position) * STEP_MULTIPLIER;
         if (*step_size < 0)
         {
             // inside sphere, stop
@@ -333,22 +365,16 @@ const RENDER_SRC: &str = r#"
             step_position[0] = ray_cframe[0] - (local_t * ray_cframe[5]);
             step_position[1] = ray_cframe[1] - (local_t * ray_cframe[8]);
             step_position[2] = ray_cframe[2] - (local_t * ray_cframe[11]);
-            *step_size = merge_sphere_sdf(object_cframe, index, object_props, prop_size, merge_indices, merge_radii, step_position) * STEP_MULTIPLIER;
+            *step_size = merge_sphere_sdf(primitives, index, merge_indices, merge_radii, step_position) * STEP_MULTIPLIER;
         }
         return local_t;
     }
 
-    int intersect_objects(__constant float* object_cframe,
-                          unsigned int object_amnt,
+    int intersect_objects(__constant Primitive* primitives,
+                          unsigned int primitive_amount,
                           __constant uint *merge_indices,
                           __constant float *merge_radii,
                           float *ray_cframe,
-                          __constant float *object_props,
-                          uchar prop_size,
-                          __constant uchar *color,
-                          __constant float *reflectance,
-                          __constant float *transparency,
-                          __constant float *refractive_index,
                           float *out_t,
                           float *out_position,
                           float *out_normal,
@@ -359,12 +385,13 @@ const RENDER_SRC: &str = r#"
     {
         float t = 9999999;
         int index_found = -1;
-        for (int i = 0; i < object_amnt; i++)
+        for (int i = 0; i < primitive_amount; i++)
         {
+            Primitive p = primitives[i];
             float local_t = 0.0f;
-            float squared_distance = calculate_squared_distance_point_to_line(&object_cframe[i * 12], ray_cframe);
+            float squared_distance = calculate_squared_distance_point_to_line(p.cframe, ray_cframe);
             // Use squared distance to avoid unnecessary square root calculation
-            if (squared_distance > (object_props[i * prop_size] + 0.01f) * (object_props[i * prop_size] + 0.01f) * 2.0f)
+            if (squared_distance > (p.payload.sphere_data.radius + 0.01f) * (p.payload.sphere_data.radius + 0.01f) * 2.0f)
             {
                 // Check if the merged spheres are not too close either
                 int close_merge_found = 0;
@@ -374,8 +401,8 @@ const RENDER_SRC: &str = r#"
                     int m_index = merge_indices[radius_index];
                     if (merge_radii[radius_index] < 0.01f)
                         break;
-                    float merge_squared_distance = calculate_squared_distance_point_to_line(&object_cframe[m_index * 12], ray_cframe);
-                    if (merge_squared_distance < (object_props[m_index * prop_size] + 0.01f) * (object_props[m_index * prop_size] + 0.01f) * 2.0f)
+                    float merge_squared_distance = calculate_squared_distance_point_to_line(p.cframe, ray_cframe);
+                    if (merge_squared_distance < (p.payload.sphere_data.radius + 0.01f) * (p.payload.sphere_data.radius + 0.01f) * 2.0f)
                     {
                         close_merge_found = 1;
                         break;
@@ -389,10 +416,8 @@ const RENDER_SRC: &str = r#"
                 // continue; // Skip this object if the ray is too far away
             }
             float step_size = 99999.0f;
-            local_t = intersect_object(object_cframe,
-                                       object_props,
+            local_t = intersect_object(primitives,
                                        i,
-                                       prop_size,
                                        ray_cframe,
                                        merge_indices,
                                        merge_radii,
@@ -409,24 +434,16 @@ const RENDER_SRC: &str = r#"
             out_position[1] = ray_cframe[1] - (ray_cframe[8] * t);
             out_position[2] = ray_cframe[2] - (ray_cframe[11] * t);
             calculate_sdf_normal(out_position,
-                                 object_cframe,
+                                 primitives,
                                  index_found,
-                                 object_props,
-                                 prop_size,
                                  merge_indices,
                                  merge_radii,
                                  out_normal);
-            calculate_params_at_intersection(object_cframe,
-                                             object_props,
+            calculate_params_at_intersection(primitives,
                                              index_found,
-                                             prop_size,
                                              out_position,
                                              merge_indices,
                                              merge_radii,
-                                             color,
-                                             reflectance,
-                                             transparency,
-                                             refractive_index,
                                              out_color,
                                              out_transparency,
                                              out_reflectance,
@@ -440,17 +457,11 @@ const RENDER_SRC: &str = r#"
                                    int *intersection_index,
                                    float *out_normal,
                                    float *out_position,
-                                   __constant float* object_cframe,
+                                   __constant Primitive* primitives,
                                    __constant uint *merge_indices,
                                    __constant float *merge_radii,
-                                   unsigned int object_amnt,
+                                   unsigned int primitive_amount,
                                    float *ray_cframe,
-                                   __constant float *object_props,
-                                   uchar prop_size,
-                                   __constant uchar *color,
-                                   __constant float *reflectance,
-                                   __constant float *transparency,
-                                   __constant float *refractive_index,
                                    __constant float *directionlight_direction,
                                    __constant uchar *directionlight_color,
                                    float *out_transparency,
@@ -459,17 +470,11 @@ const RENDER_SRC: &str = r#"
     {
         float t;
         float edge_pos[3];
-        *intersection_index = intersect_objects(object_cframe,
-                                                object_amnt,
+        *intersection_index = intersect_objects(primitives,
+                                                primitive_amount,
                                                 merge_indices,
                                                 merge_radii,
                                                 ray_cframe,
-                                                object_props,
-                                                prop_size,
-                                                color,
-                                                reflectance,
-                                                transparency,
-                                                refractive_index,
                                                 &t,
                                                 edge_pos,
                                                 out_normal,
@@ -513,17 +518,11 @@ const RENDER_SRC: &str = r#"
                 float shadow_transparency;
                 float shadow_reflectance;
                 float shadow_refractive_index;
-                int dl_int_index = intersect_objects(object_cframe,
-                                                     object_amnt,
+                int dl_int_index = intersect_objects(primitives,
+                                                     primitive_amount,
                                                      merge_indices,
                                                      merge_radii,
                                                      edge_to_dir_light,
-                                                     object_props,
-                                                     prop_size,
-                                                     color,
-                                                     reflectance,
-                                                     transparency,
-                                                     refractive_index,
                                                      &dl_t,
                                                      light_edge_pos,
                                                      light_normal,
@@ -545,6 +544,7 @@ const RENDER_SRC: &str = r#"
                 }
                 else
                 {
+                    Primitive p = primitives[dl_int_index];
                     uchar filtered_light_r = directionlight_color[0] * (shadow_transparency * 1.0f + (1.0f - shadow_transparency) * (shadow_color[0] / 255.0f));
                     uchar filtered_light_g = directionlight_color[1] * (shadow_transparency * 1.0f + (1.0f - shadow_transparency) * (shadow_color[1] / 255.0f));
                     uchar filtered_light_b = directionlight_color[2] * (shadow_transparency * 1.0f + (1.0f - shadow_transparency) * (shadow_color[2] / 255.0f));
@@ -557,16 +557,14 @@ const RENDER_SRC: &str = r#"
                     float step_size = 99999.0f;
                     float light_edge_pos[3];
                     float light_normal[3];
-                    float other_side_ray[12] = { edge_to_dir_light[0] - (directionlight_direction[0] * object_props[dl_int_index * prop_size] * 3),
-                                                edge_to_dir_light[1] - (directionlight_direction[1] * object_props[dl_int_index * prop_size] * 3),
-                                                edge_to_dir_light[2] - (directionlight_direction[2] * object_props[dl_int_index * prop_size] * 3),
+                    float other_side_ray[12] = { edge_to_dir_light[0] - (directionlight_direction[0] * p.payload.sphere_data.radius * 3),
+                                                edge_to_dir_light[1] - (directionlight_direction[1] * p.payload.sphere_data.radius * 3),
+                                                edge_to_dir_light[2] - (directionlight_direction[2] * p.payload.sphere_data.radius * 3),
                                                 0.0f, 0.0f, -directionlight_direction[0],
                                                 0.0f, 0.0f, -directionlight_direction[1],
                                                 0.0f, 0.0f, -directionlight_direction[2] };
-                    float dl_t2 = intersect_object(object_cframe,
-                                                   object_props,
+                    float dl_t2 = intersect_object(primitives,
                                                    dl_int_index,
-                                                   prop_size,
                                                    other_side_ray,
                                                    merge_indices,
                                                    merge_radii,
@@ -683,14 +681,12 @@ const RENDER_SRC: &str = r#"
                                     float *position,
                                     float *outgoing_ray,
                                     float n1,
-                                    __constant float *object_cframe,
-                                    __constant float* object_props,
-                                    uchar prop_size,
+                                    __constant Primitive *primitives,
                                     __constant uint *merge_indices,
                                     __constant float *merge_radii,
                                     int intersection_index)
     {
-        float radius = object_props[intersection_index * prop_size];
+        float radius = primitives[intersection_index].payload.sphere_data.radius;
         float internal_ray[12];
         calculate_refracted_ray(normal, incoming_ray, position, internal_ray, AIR_REFRACTIVE_INDEX, n1);
         internal_ray[0] = internal_ray[0] - internal_ray[5] * radius * 4;
@@ -700,10 +696,8 @@ const RENDER_SRC: &str = r#"
         internal_ray[8] = -internal_ray[8];
         internal_ray[11] = -internal_ray[11];
         float step_size;
-        float local_t = intersect_object(object_cframe,
-                                         object_props,
+        float local_t = intersect_object(primitives,
                                          intersection_index,
-                                         prop_size,
                                          internal_ray,
                                          merge_indices,
                                          merge_radii,
@@ -711,10 +705,8 @@ const RENDER_SRC: &str = r#"
         float internal_edge_pos[3] = { internal_ray[0] - (internal_ray[5] * local_t), internal_ray[1] - (internal_ray[8] * local_t), internal_ray[2] - (internal_ray[11] * local_t) };
         float internal_normal[3] = { 0.0f, 0.0f, 0.0f };
         calculate_sdf_normal(internal_edge_pos,
-                             object_cframe,
+                             primitives,
                              intersection_index,
-                             object_props,
-                             prop_size,
                              merge_indices,
                              merge_radii,
                              internal_normal);
@@ -732,18 +724,12 @@ const RENDER_SRC: &str = r#"
     }
 
     void render_pixel(__global uchar *output_buffer,
-                      __constant float* object_cframe,
-                      unsigned int object_amnt,
+                      __constant Primitive* primitives,
+                      unsigned int primitive_amount,
                       __constant uint *merge_indices,
                       __constant float *merge_radii,
                       __constant float *camera_cframe,
                       float *ray_rotation_matrix,
-                      __constant float *object_props,
-                      uchar prop_size,
-                      __constant uchar *color,
-                      __constant float *reflectance,
-                      __constant float *transparency,
-                      __constant float *refractive_index,
                       __constant float *directionlight_direction,
                       __constant uchar *directionlight_color)
     {
@@ -790,24 +776,17 @@ const RENDER_SRC: &str = r#"
                                       &intersection_index,
                                       result_normal,
                                       result_position,
-                                      object_cframe,
+                                      primitives,
                                       merge_indices,
                                       merge_radii,
-                                      object_amnt,
+                                      primitive_amount,
                                       ray_stack[stack_ptr].cframe,
-                                      object_props,
-                                      prop_size,
-                                      color,
-                                      reflectance,
-                                      transparency,
-                                      refractive_index,
                                       directionlight_direction,
                                       directionlight_color,
                                       &calc_transparency,
                                       &calc_reflectance,
                                       &calc_refractive_index);
             // if (calc_transparency > 0.1f && calc_transparency < 0.5f)
-            //     printf("hooray!");
             if (intersection_index < 0) {
                 // No intersection found, just continue to the next ray in the stack
                 ray_stack[stack_ptr].surface_index = -1;
@@ -831,9 +810,7 @@ const RENDER_SRC: &str = r#"
                                            result_position,
                                            ray_stack[stack_ptr + rays_inserted + 1].cframe,
                                            calc_refractive_index,
-                                           object_cframe,
-                                           object_props,
-                                           prop_size,
+                                           primitives,
                                            merge_indices,
                                            merge_radii,
                                            intersection_index);
@@ -883,19 +860,13 @@ const RENDER_SRC: &str = r#"
                          float camera_width,
                          float camera_height,
                          float focal_length,
-                         __constant float *object_cframe,
                          __constant uint *merge_indices,
                          __constant float *merge_radii,
-                         unsigned int object_amnt,
-                         __constant float *object_props,
-                         uchar prop_size,
-                         __constant uchar *color,
-                         __constant float *reflectance,
-                         __constant float *transparency,
-                         __constant float *refractive_index,
                          __constant float *directionlight_direction,
                          __constant uchar *directionlight_color,
-                         __constant OctreeNode* nodes) {
+                         __constant OctreeNode* nodes,
+                         __constant Primitive* primitives,
+                         unsigned int primitive_amount) {
         int x = get_global_id(0) % width;
         int y = get_global_id(0) / width;
         float cam_x = - (camera_width / 2) + (((float) x / (float) width) * camera_width);
@@ -908,7 +879,7 @@ const RENDER_SRC: &str = r#"
         setup_rotation_from_angles(alpha, beta, 0.0f, cam_ray_rotation);
         float cam_ray[] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
         matrix_multiplication(&camera[3], cam_ray_rotation, cam_ray, 3);
-        render_pixel(output_buffer, object_cframe, object_amnt, merge_indices, merge_radii, camera, cam_ray, object_props, prop_size, color, reflectance, transparency, refractive_index, directionlight_direction, directionlight_color);
+        render_pixel(output_buffer, primitives, primitive_amount, merge_indices, merge_radii, camera, cam_ray, directionlight_direction, directionlight_color);
     }
 "#;
 
@@ -946,61 +917,9 @@ impl Renderer {
         Ok(())
     }
 
-    pub fn render_frame(&mut self, mut camera: Camera, mut render_objects: Vec<RenderObject>, merge_indices: Vec<u32>, merge_radii: Vec<f32>, directionlight_direction: Vec<f32>, directionlight_color: Vec<u8>) -> Result<Vec::<u8>, RendererError> {
+    pub fn render_frame(&mut self, mut camera: Camera, merge_indices: Vec<u32>, merge_radii: Vec<f32>, directionlight_direction: Vec<f32>, directionlight_color: Vec<u8>, primitives: &Vec<Primitive>) -> Result<Vec::<u8>, RendererError> {
         let c_width = u16::try_from(self.width).map_err(|_| RendererError::DimensionsTooBigError)?;
         let c_height = u16::try_from(self.height).map_err(|_| RendererError::DimensionsTooBigError)?;
-
-        let mut cframe_vec = Vec::<f32>::new();
-        let mut object_props_vec = Vec::<f32>::new();
-        let mut color_vec = Vec::<u8>::new();
-        let mut reflectance_vec = Vec::<f32>::new();
-        let mut transparency_vec = Vec::<f32>::new();
-        let mut refractive_index_vec = Vec::<f32>::new();
-        let prop_size: u8 = render_objects[0].get_object_props_vec().len() as u8;
-        for obj in render_objects.iter_mut() {
-            cframe_vec.extend(obj.convert_to_cframe_buffer());
-            object_props_vec.extend(obj.get_object_props_vec());
-            color_vec.extend(obj.get_color_vec());
-            reflectance_vec.push(obj.get_reflectance());
-            transparency_vec.push(obj.get_transparency());
-            refractive_index_vec.push(obj.get_refractive_index());
-        }
-
-        let cframe_buffer = Buffer::builder().queue(self.pro_que.as_mut().ok_or(RendererError::RendererNotInitializedError)?.queue().clone())
-            .flags(MemFlags::new().read_write())
-            .len(cframe_vec.len())
-            .copy_host_slice(&cframe_vec)
-            .build().map_err(|e| RendererError::CreateBufferError(e))?;
-
-        let object_prop_buffer = Buffer::builder().queue(self.pro_que.as_mut().ok_or(RendererError::RendererNotInitializedError)?.queue().clone())
-            .flags(MemFlags::new().read_write())
-            .len(object_props_vec.len())
-            .copy_host_slice(&object_props_vec)
-            .build().map_err(|e| RendererError::CreateBufferError(e))?;
-
-        let color_buffer = Buffer::builder().queue(self.pro_que.as_mut().ok_or(RendererError::RendererNotInitializedError)?.queue().clone())
-            .flags(MemFlags::new().read_write())
-            .len(color_vec.len())
-            .copy_host_slice(&color_vec)
-            .build().map_err(|e| RendererError::CreateBufferError(e))?;
-
-        let reflectance_buffer = Buffer::builder().queue(self.pro_que.as_mut().ok_or(RendererError::RendererNotInitializedError)?.queue().clone())
-            .flags(MemFlags::new().read_write())
-            .len(reflectance_vec.len())
-            .copy_host_slice(&reflectance_vec)
-            .build().map_err(|e| RendererError::CreateBufferError(e))?;
-
-        let transparency_buffer = Buffer::builder().queue(self.pro_que.as_mut().ok_or(RendererError::RendererNotInitializedError)?.queue().clone())
-            .flags(MemFlags::new().read_write())
-            .len(transparency_vec.len())
-            .copy_host_slice(&transparency_vec)
-            .build().map_err(|e| RendererError::CreateBufferError(e))?;
-
-        let refractive_index_buffer = Buffer::builder().queue(self.pro_que.as_mut().ok_or(RendererError::RendererNotInitializedError)?.queue().clone())
-            .flags(MemFlags::new().read_write())
-            .len(refractive_index_vec.len())
-            .copy_host_slice(&refractive_index_vec)
-            .build().map_err(|e| RendererError::CreateBufferError(e))?;
 
         let camera_buffer = Buffer::builder().queue(self.pro_que.as_mut().ok_or(RendererError::RendererNotInitializedError)?.queue().clone())
             .flags(MemFlags::new().read_write())
@@ -1039,6 +958,12 @@ impl Renderer {
             .copy_host_slice(octree.get_nodes().get_items())
             .build().map_err(|e| RendererError::CreateBufferError(e))?;
 
+        let primitive_buffer = Buffer::builder().queue(self.pro_que.as_mut().ok_or(RendererError::RendererNotInitializedError)?.queue().clone())
+            .flags(MemFlags::new().read_write())
+            .len(primitives.len())
+            .copy_host_slice(primitives)
+            .build().map_err(|e| RendererError::CreateBufferError(e))?;
+
         let focal_length = camera.get_focal_length();
         let horizontal_fov = camera.get_fov();
         let horizontal_fov_rad = horizontal_fov / 180.0 * std::f32::consts::PI;
@@ -1055,19 +980,13 @@ impl Renderer {
             .arg(camera_width)
             .arg(camera_height)
             .arg(focal_length)
-            .arg(cframe_buffer)
             .arg(merge_indices_buffer)
             .arg(merge_radii_buffer)
-            .arg((cframe_vec.len() / 12) as u32)
-            .arg(object_prop_buffer)
-            .arg(prop_size)
-            .arg(color_buffer)
-            .arg(reflectance_buffer)
-            .arg(transparency_buffer)
-            .arg(refractive_index_buffer)
             .arg(directionlight_direction_buffer)
             .arg(directionlight_color_buffer)
             .arg(octree_buffer)
+            .arg(primitive_buffer)
+            .arg(primitives.len() as u32)
             .build().map_err(|e| RendererError::AddArgumentsError(e))?;
 
         unsafe { kernel.enq().map_err(|e| RendererError::ExecuteKernelError(e))?; }

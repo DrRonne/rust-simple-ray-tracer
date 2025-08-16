@@ -1,4 +1,5 @@
-#[derive(Copy, Clone)]
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub struct CFrame {
     pub x: f32,
     pub y: f32,

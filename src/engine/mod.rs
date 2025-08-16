@@ -1,5 +1,5 @@
 pub mod camera;
-pub mod sphere;
+pub mod primitives;
 pub mod world;
 pub mod lights;
 pub mod sphere_merge;

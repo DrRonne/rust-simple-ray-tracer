@@ -1,8 +1,8 @@
-use crate::engine::render::render::{Renderable, RenderObject};
+use crate::engine::primitives::primitive::Primitive;
 
 #[derive(Default)]
 pub struct MergeModel {
-    spheres: Vec<Box<dyn Renderable>>,
+    primitives: Vec<Primitive>,
     merges: Vec<SphereMerge>
 }
 
@@ -20,8 +20,8 @@ impl MergeModel {
          }
     }
 
-    pub fn add_sphere(&mut self, sphere: Box<dyn Renderable>) {
-        self.spheres.push(sphere);
+    pub fn add_primitive(&mut self, sphere: Primitive) {
+        self.primitives.push(sphere);
     }
 
     pub fn add_merge(&mut self, sphere1: u32, sphere2: u32, inverted_radius: f32) {
@@ -34,12 +34,8 @@ impl MergeModel {
         );
     }
 
-    pub fn get_render_objects(&mut self) -> Vec<RenderObject> {
-        let mut render_objects: Vec<RenderObject> = Vec::new();
-        for obj in self.spheres.iter_mut() {
-            render_objects.push(obj.get_render_object());
-        }
-        return render_objects;
+    pub fn get_primitives(&mut self) -> &Vec<Primitive> {
+        &self.primitives
     }
 
     pub fn get_merges(&self) -> &Vec<SphereMerge> {
