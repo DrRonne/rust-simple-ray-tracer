@@ -57,6 +57,9 @@ fn main() -> Result<(), Error> {
     sphere3.set_transparency(0.9f32);
     sphere3.set_refractive_index(1.0f32);
     sphere4.set_color([0x00u8, 0xffu8, 0xffu8]);
+    sphere4.set_render_radius(15f32);
+    sphere5.set_render_radius(15f32);
+    sphere8.set_render_radius(8f32);
     sphere8.set_color([0x00u8, 0x00u8, 0xffu8]);
     sphere8.set_reflectance(0.5f32);
     // sphere4.set_transparency(0.5f32);

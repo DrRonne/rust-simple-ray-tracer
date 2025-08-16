@@ -68,6 +68,7 @@ const RENDER_SRC: &str = r#"
         float reflectance;
         uchar color[3];
         CFrame cframe;
+        float render_radius;
         unsigned int merge_indices[6];
         float merge_radii[6];
         float _pad_common;
@@ -177,11 +178,6 @@ const RENDER_SRC: &str = r#"
     {
         Primitive p = primitives[index];
         float sdf = sphere_sdf(p.cframe, p.payload.sphere_data.radius, position);
-        // if (index == 0)
-            // printf("%d %d %d %d %d %d %f %f %f %f %f %f",
-            // p.merge_indices[0], p.merge_indices[1], p.merge_indices[2], p.merge_indices[3], p.merge_indices[4], p.merge_indices[5],
-            // p.merge_radii[0], p.merge_radii[1], p.merge_radii[2], p.merge_radii[3], p.merge_radii[4], p.merge_radii[5]
-            // );
         for (int m = 0; m < MAXIMUM_MERGES; m++)
         {
             uint m_index = p.merge_indices[m];
@@ -386,7 +382,7 @@ const RENDER_SRC: &str = r#"
             float local_t = 0.0f;
             float squared_distance = calculate_squared_distance_point_to_line(p.cframe, ray_cframe);
             // Use squared distance to avoid unnecessary square root calculation
-            if (squared_distance > (p.payload.sphere_data.radius + 0.01f) * (p.payload.sphere_data.radius + 0.01f) * 2.0f)
+            if (squared_distance > p.render_radius * p.render_radius)
             {
                 // Check if the merged spheres are not too close either
                 int close_merge_found = 0;
@@ -396,7 +392,7 @@ const RENDER_SRC: &str = r#"
                     if (p.merge_radii[m] < 0.01f)
                         break;
                     float merge_squared_distance = calculate_squared_distance_point_to_line(p.cframe, ray_cframe);
-                    if (merge_squared_distance < (p.payload.sphere_data.radius + 0.01f) * (p.payload.sphere_data.radius + 0.01f) * 2.0f)
+                    if (merge_squared_distance < p.render_radius * p.render_radius)
                     {
                         close_merge_found = 1;
                         break;
@@ -539,9 +535,9 @@ const RENDER_SRC: &str = r#"
                     float step_size = 99999.0f;
                     float light_edge_pos[3];
                     float light_normal[3];
-                    float other_side_ray[12] = { edge_to_dir_light[0] - (directionlight_direction[0] * p.payload.sphere_data.radius * 3),
-                                                edge_to_dir_light[1] - (directionlight_direction[1] * p.payload.sphere_data.radius * 3),
-                                                edge_to_dir_light[2] - (directionlight_direction[2] * p.payload.sphere_data.radius * 3),
+                    float other_side_ray[12] = { edge_to_dir_light[0] - (directionlight_direction[0] * p.render_radius * 3),
+                                                edge_to_dir_light[1] - (directionlight_direction[1] * p.render_radius * 3),
+                                                edge_to_dir_light[2] - (directionlight_direction[2] * p.render_radius * 3),
                                                 0.0f, 0.0f, -directionlight_direction[0],
                                                 0.0f, 0.0f, -directionlight_direction[1],
                                                 0.0f, 0.0f, -directionlight_direction[2] };
@@ -664,7 +660,7 @@ const RENDER_SRC: &str = r#"
                                     __constant Primitive *primitives,
                                     int intersection_index)
     {
-        float radius = primitives[intersection_index].payload.sphere_data.radius;
+        float radius = primitives[intersection_index].render_radius;
         float internal_ray[12];
         calculate_refracted_ray(normal, incoming_ray, position, internal_ray, AIR_REFRACTIVE_INDEX, n1);
         internal_ray[0] = internal_ray[0] - internal_ray[5] * radius * 4;

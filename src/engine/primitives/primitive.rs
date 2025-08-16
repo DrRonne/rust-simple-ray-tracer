@@ -59,6 +59,7 @@ pub struct Primitive {
     reflectance: f32,
     color: [u8; 3],
     cframe: CFrame,
+    render_radius: f32,
     merge_indices: [u32; MAX_MERGES],
     merge_radii: [f32; MAX_MERGES],
     _pad_common: f32,
@@ -100,6 +101,9 @@ impl Primitive {
         self.reflectance = reflectance;
     }
 
+    // The render radius should never be set to something smaller than the maximum span an object can have!
+    // Render radius basically means that a ray needs to be within that range of the object for it to continue checking intersections with it
+    // If the render radius is set smaller than the maximum span of the object, the ray could exclude it from its calculations while it really should be excluded!
     pub fn set_render_radius(&mut self, render_radius: f32) {
         self.render_radius = render_radius;
     }
@@ -178,3 +182,184 @@ impl Positionable for Primitive {
 
 // SAFETY: OctreeNode is plain-old-data (POD) and contains only OclPrm-compatible fields.
 unsafe impl OclPrm for Primitive {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DEFAULT_RADIUS: f32 = 10.0f32;
+
+    #[test]
+    fn test_create_sphere_primitive() {
+        let s = Primitive::new_sphere(DEFAULT_RADIUS);
+        assert_eq!(s.kind, Kind::SPHERE);
+        assert_eq!(s.transparency, 0.0f32);
+        assert_eq!(s.reflectance, 0.0f32);
+        assert_eq!(s.refractive_index, 1.0f32);
+        assert_eq!(s.color[0], 0xFF);
+        assert_eq!(s.color[1], 0xFF);
+        assert_eq!(s.color[2], 0xFF);
+        assert_eq!(s.cframe, CFrame::default());
+        assert_eq!(s.render_radius, DEFAULT_RADIUS);
+        assert_eq!(s.merge_indices, [0, 0, 0, 0, 0, 0]);
+        assert_eq!(s.merge_radii, [0f32, 0f32, 0f32, 0f32, 0f32, 0f32]);
+        // SAFETY: just created the primitive as a sphere, so sphere_data should be the correct payload
+        unsafe {
+            assert_eq!(s.payload.sphere_data.radius, DEFAULT_RADIUS);
+        }
+    }
+
+    #[test]
+    fn test_set_color() {
+        let mut s = Primitive::new_sphere(DEFAULT_RADIUS);
+        s.set_color([0x00, 0xFF, 0xFA]);
+        assert_eq!(s.color, [0x00, 0xFF, 0xFA]);
+    }
+
+    #[test]
+    fn test_set_transparency() {
+        let mut s = Primitive::new_sphere(DEFAULT_RADIUS);
+        s.set_transparency(0.5f32);
+        assert_eq!(s.transparency, 0.5f32);
+    }
+
+    #[test]
+    fn test_set_reflectance() {
+        let mut s = Primitive::new_sphere(DEFAULT_RADIUS);
+        s.set_reflectance(0.5f32);
+        assert_eq!(s.reflectance, 0.5f32);
+    }
+
+    #[test]
+    fn test_set_refractive_index() {
+        let mut s = Primitive::new_sphere(DEFAULT_RADIUS);
+        s.set_refractive_index(0.5f32);
+        assert_eq!(s.refractive_index, 0.5f32);
+    }
+
+    #[test]
+    fn test_set_render_radius() {
+        let mut s = Primitive::new_sphere(DEFAULT_RADIUS);
+        s.set_render_radius(0.5f32);
+        assert_eq!(s.render_radius, 0.5f32);
+    }
+
+    #[test]
+    fn test_set_position() {
+        let mut s = Primitive::new_sphere(DEFAULT_RADIUS);
+        let position = (1f32, 2f32, 3f32);
+        s.set_position(position.0, position.1, position.2);
+        let mut comp = CFrame::default();
+        comp.x = position.0;
+        comp.y = position.1;
+        comp.z = position.2;
+        assert_eq!(s.cframe, comp);
+    }
+
+    #[test]
+    fn test_set_cframe() {
+        let mut s = Primitive::new_sphere(DEFAULT_RADIUS);
+        let angles = (0.1f32, 0.2f32, 0.3f32);
+        let vector = (10f32, 20f32, 30f32);
+        let mut res = CFrame::default();
+        res.multiply_angles(angles.0, angles.1, angles.2);
+        res.multiply_vector(vector.0, vector.1, vector.2);
+        s.set_cframe(res);
+        assert_eq!(s.cframe, res);
+    }
+
+    #[test]
+    fn test_add_merge() {
+        let mut s = Primitive::new_sphere(DEFAULT_RADIUS);
+        for i in 0..MAX_MERGES {
+            let added_index = i as u32;
+            let added_radius = (i + 1) as f32;
+            s.add_merge(added_index, added_radius);
+            assert_eq!(s.merge_indices[i], added_index);
+            assert_eq!(s.merge_radii[i], added_radius);
+        }
+    }
+
+    #[test]
+    fn test_add_too_small_merge() {
+        let mut s = Primitive::new_sphere(DEFAULT_RADIUS);
+        s.add_merge(1, 0.005f32);
+        // The merge should not be added if the radius is too small
+        assert_eq!(s.merge_indices[0], 0);
+        assert_eq!(s.merge_radii[0], 0.0f32);
+    }
+
+    #[test]
+    fn test_shift_1_merge() {
+        let mut s = Primitive::new_sphere(DEFAULT_RADIUS);
+        // This should technically not be possible by using public calls,
+        // but for the sake of having the algorithm completely covered,
+        // test the algorithm with some funky input
+        s.merge_indices[MAX_MERGES - 1] = 1;
+        s.merge_radii[MAX_MERGES - 1] = 1.0f32;
+        s.shift_used_indices_left();
+        assert_eq!(s.merge_indices[0], 1);
+        assert_eq!(s.merge_radii[0], 1.0f32);
+        for i in 1..MAX_MERGES {
+            assert_eq!(s.merge_indices[i], 0);
+            assert_eq!(s.merge_radii[i], 0.0f32);
+        }
+    }
+
+    #[test]
+    fn test_shift_2_merges() {
+        let mut s = Primitive::new_sphere(DEFAULT_RADIUS);
+        // This should technically not be possible by using public calls,
+        // but for the sake of having the algorithm completely covered,
+        // test the algorithm with some funky input
+        s.merge_indices[MAX_MERGES - 1] = 1;
+        s.merge_radii[MAX_MERGES - 1] = 1.0f32;
+        s.merge_indices[MAX_MERGES - 2] = 2;
+        s.merge_radii[MAX_MERGES - 2] = 2.0f32;
+        s.shift_used_indices_left();
+        assert_eq!(s.merge_indices[0], 2);
+        assert_eq!(s.merge_radii[0], 2.0f32);
+        assert_eq!(s.merge_indices[1], 1);
+        assert_eq!(s.merge_radii[1], 1.0f32);
+        for i in 2..MAX_MERGES {
+            assert_eq!(s.merge_indices[i], 0);
+            assert_eq!(s.merge_radii[i], 0.0f32);
+        }
+    }
+
+    #[test]
+    fn test_remove_merge() {
+        // First same as adding merges
+        let mut s = Primitive::new_sphere(DEFAULT_RADIUS);
+        for i in 0..MAX_MERGES {
+            let added_index = i as u32;
+            let added_radius = (i + 1) as f32;
+            s.add_merge(added_index, added_radius);
+            assert_eq!(s.merge_indices[i], added_index);
+            assert_eq!(s.merge_radii[i], added_radius);
+        }
+        // Now remove in the same order, which would be worst case scenario for the shifting algorithm
+        for i in 0..MAX_MERGES {
+            s.remove_merge(i as u32);
+            for j in 0..MAX_MERGES {
+                if j >= (MAX_MERGES - (i + 1)) {
+                    assert_eq!(s.merge_indices[j], 0);
+                    assert_eq!(s.merge_radii[j], 0.0f32);
+                } else {
+                    assert_eq!(s.merge_indices[j], (j + i + 1) as u32);
+                    assert_eq!(s.merge_radii[j], (j + i + 2) as f32);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_set_radius() {
+        let mut s = Primitive::new_sphere(DEFAULT_RADIUS);
+        s.set_radius(50.0f32);
+        // SAFETY: just created the primitive as a sphere, so sphere_data should be the correct payload
+        unsafe {
+            assert_eq!(s.payload.sphere_data.radius, 50.0f32);
+        }
+    }
+}
