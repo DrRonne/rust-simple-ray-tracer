@@ -111,35 +111,6 @@ const RENDER_SRC: &str = r#"
         return (diff[0] * diff[0]) + (diff[1] * diff[1]) + (diff[2] * diff[2]);
     }
 
-    void find_point_on_line_at_distance_from_point(__constant float *point,
-                                                   float *ray,
-                                                   float distance,
-                                                   float *out_t)
-    {
-        float point_origin_diff[3] = { ray[0] - point[0],
-                                       ray[1] - point[1],
-                                       ray[2] - point[2] };
-        float a = (ray[5] * ray[5]) + (ray[8] * ray[8]) + (ray[11] * ray[11]);
-        float b = -2.0f * (ray[5] * point_origin_diff[0] + ray[8] * point_origin_diff[1] + ray[11] * point_origin_diff[2]);
-        float c = (point_origin_diff[0] * point_origin_diff[0]) + 
-                  (point_origin_diff[1] * point_origin_diff[1]) + 
-                  (point_origin_diff[2] * point_origin_diff[2]) - (distance * distance);
-        float t0, t1;
-        if (solveQuadratic(a, b, c, &t0, &t1)) {
-            if (t0 > 0 && t1 > 0) {
-                *out_t = min(t0, t1);
-            } else if (t0 > 0) {
-                *out_t = t0;
-            } else if (t1 > 0) {
-                *out_t = t1;
-            } else {
-                *out_t = -1.0f; // No solution
-            }
-        } else {
-            *out_t = -1.0f; // No solution
-        }
-    }
-
     float smooth_min(float a,
                      float b,
                      float k)
@@ -230,105 +201,6 @@ const RENDER_SRC: &str = r#"
         }
     }
 
-    void intersect_sphere(__constant float *sphere_cframe,
-                          float sphere_radius,
-                          float *ray_cframe,
-                          float *t)
-    {
-        float Lx = sphere_cframe[0] - ray_cframe[0];
-        float Ly = sphere_cframe[1] - ray_cframe[1];
-        float Lz = sphere_cframe[2] - ray_cframe[2];
-
-        float a = ray_cframe[5] * ray_cframe[5] + ray_cframe[8] * ray_cframe[8] + ray_cframe[11] * ray_cframe[11];
-        float b = 2 * (ray_cframe[5] * Lx + ray_cframe[8] * Ly + ray_cframe[11] * Lz);
-        float c = Lx * Lx + Ly * Ly + Lz * Lz - sphere_radius * sphere_radius;
-        float t0, t1;
-        if (solveQuadratic(a, b, c, &t0, &t1)) {
-            if (t0 > 0 && t1 > 0){
-                *t = min(t0, t1);
-            }
-            else if (t0 > 0) {
-                *t = t0;
-            }
-            else if (t1 > 0) {
-                *t = t1;
-            }
-            else {
-                *t = -1;
-            }
-        } else {
-            *t = -1;
-        }
-    }
-
-    void calculate_normal_vector(__constant float* object_cframe,
-                                 int object_index,
-                                 __constant float *object_props,
-                                 uchar prop_size,
-                                 float *edge_pos,
-                                 float *out_normal)
-    {
-        float normal[3] = { edge_pos[0] - object_cframe[object_index * 12], edge_pos[1] - object_cframe[(object_index * 12) + 1], edge_pos[2] - object_cframe[(object_index * 12) + 2] };
-        float normal_size = sqrt((normal[0] * normal[0]) + (normal[1] * normal[1]) + (normal[2] * normal[2]));
-        out_normal[0] = normal[0] / normal_size;
-        out_normal[1] = normal[1] / normal_size;
-        out_normal[2] = normal[2] / normal_size;
-    }
-
-    void calculate_metaball_normal(float *position,
-                                   __constant float *object_cframe,
-                                   __constant float *object_props,
-                                   uchar prop_size,
-                                   int main_index,
-                                   __constant uint *merge_indices,
-                                   __constant float *merge_radii,
-                                   float *out_normal) 
-    {
-        // Start with zero normal
-        out_normal[0] = 0.0f;
-        out_normal[1] = 0.0f;
-        out_normal[2] = 0.0f;
-
-        // Main sphere
-        float dx = position[0] - object_cframe[main_index * 12];
-        float dy = position[1] - object_cframe[main_index * 12 + 1];
-        float dz = position[2] - object_cframe[main_index * 12 + 2];
-        float r = object_props[main_index * prop_size];
-        float dist2 = dx*dx + dy*dy + dz*dz + 1e-6f; // avoid div by zero
-        float dist4 = dist2 * dist2;
-        out_normal[0] -= -2.0f * r * r * dx / dist4;
-        out_normal[1] -= -2.0f * r * r * dy / dist4;
-        out_normal[2] -= -2.0f * r * r * dz / dist4;
-
-        // Merged spheres
-        for (int m = 0; m < MAXIMUM_MERGES; m++) {
-            if (merge_radii[m] < 0.01f)
-                break;
-            int merge_idx = merge_indices[m];
-            float mdx = position[0] - object_cframe[merge_idx * 12];
-            float mdy = position[1] - object_cframe[merge_idx * 12 + 1];
-            float mdz = position[2] - object_cframe[merge_idx * 12 + 2];
-            float mr = object_props[merge_idx * prop_size];
-            float mdist2 = mdx*mdx + mdy*mdy + mdz*mdz + 1e-6f;
-            float mdist4 = mdist2 * mdist2;
-            out_normal[0] -= -2.0f * mr * mr * mdx / mdist4;
-            out_normal[1] -= -2.0f * mr * mr * mdy / mdist4;
-            out_normal[2] -= -2.0f * mr * mr * mdz / mdist4;
-        }
-
-        // Normalize the normal
-        float len = sqrt(out_normal[0]*out_normal[0] + out_normal[1]*out_normal[1] + out_normal[2]*out_normal[2]);
-        if (len > 1e-6f) {
-            out_normal[0] /= len;
-            out_normal[1] /= len;
-            out_normal[2] /= len;
-        } else {
-            out_normal[0] = 0.0f;
-            out_normal[1] = 0.0f;
-            out_normal[2] = 1.0f;
-        }
-    }
-
     float calculate_squared_euclidean_distance(__constant float *a,
                                                float *b)
     {
@@ -336,25 +208,6 @@ const RENDER_SRC: &str = r#"
         float dy = a[1] - b[1];
         float dz = a[2] - b[2];
         return (dx * dx) + (dy * dy) + (dz * dz);
-    }
-
-    float squared_sphere_sdf(__constant float *sphere_cframe,
-                             float sphere_radius,
-                             float *point)
-    {
-        return calculate_squared_euclidean_distance(sphere_cframe, point) - (sphere_radius * sphere_radius);
-    }
-
-    float sphere_field_function(float sphere_radius,
-                                float squared_distance)
-    {
-        return (sphere_radius * sphere_radius) / squared_distance;
-    }
-
-    float calculate_manhattan_distance(__constant float *a,
-                                       float *b)
-    {
-        return fabs(a[0] - b[0]) + fabs(a[1] - b[1]) + fabs(a[2] - b[2]);
     }
 
     void gather_blend_objects(__constant uint *merge_indices,
