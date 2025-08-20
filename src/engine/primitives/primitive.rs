@@ -109,12 +109,24 @@ impl Primitive {
     }
 
     pub fn set_radius(&mut self, radius: f32) {
-        if (self.kind != Kind::SPHERE) {
+        if self.kind != Kind::SPHERE {
             println!("WARNING: Attempted to set radius on a primitive that is not a sphere!");
         } else {
             // SAFETY: if statement checked for correct structure in the union
             unsafe {
                 self.payload.sphere_data.radius = radius;
+            }
+        }
+    }
+
+    pub fn get_radius(&self) -> f32 {
+        if self.kind != Kind::SPHERE {
+            println!("WARNING: Attempted to get radius on a primitive that is not a sphere!");
+            0.0f32
+        } else {
+            // SAFETY: if statement checked for correct structure in the union
+            unsafe {
+                self.payload.sphere_data.radius
             }
         }
     }
@@ -360,6 +372,16 @@ mod tests {
         // SAFETY: just created the primitive as a sphere, so sphere_data should be the correct payload
         unsafe {
             assert_eq!(s.payload.sphere_data.radius, 50.0f32);
+        }
+    }
+
+    #[test]
+    fn test_get_radius() {
+        let s = Primitive::new_sphere(DEFAULT_RADIUS);
+        let radius = s.get_radius();
+        // SAFETY: just created the primitive as a sphere, so sphere_data should be the correct payload
+        unsafe {
+            assert_eq!(radius, s.payload.sphere_data.radius);
         }
     }
 }
