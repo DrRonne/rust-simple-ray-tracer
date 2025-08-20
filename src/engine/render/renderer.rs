@@ -879,7 +879,7 @@ impl Renderer {
         Ok(())
     }
 
-    pub fn render_frame(&mut self, mut camera: Camera, directionlight_direction: Vec<f32>, directionlight_color: Vec<u8>, primitives: &Vec<Primitive>) -> Result<Vec::<u8>, RendererError> {
+    pub fn render_frame(&mut self, mut camera: Camera, directionlight_direction: [f32; 3], directionlight_color: [u8; 3], primitives: &Vec<Primitive>) -> Result<Vec::<u8>, RendererError> {
         let c_width = u16::try_from(self.width).map_err(|_| RendererError::DimensionsTooBigError)?;
         let c_height = u16::try_from(self.height).map_err(|_| RendererError::DimensionsTooBigError)?;
 

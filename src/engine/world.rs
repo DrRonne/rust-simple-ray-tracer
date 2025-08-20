@@ -24,12 +24,16 @@ impl World {
         self.primitives.add(primitive)
     }
 
-    pub fn get_direction_light_direction_vec(&mut self) -> Vec<f32> {
-        return self.directionlight.get_direction();
+    pub fn get_direction_light_direction_vec(&self) ->[f32; 3] {
+        self.directionlight.get_direction()
     }
 
-    pub fn get_direction_light_color_vec(&mut self) -> Vec<u8> {
-        return self.directionlight.get_color();
+    pub fn get_direction_light_color_vec(&self) -> [u8; 3] {
+        self.directionlight.get_color()
+    }
+
+    pub fn set_direction_light_direction(&mut self, direction: [f32; 3]) {
+        self.directionlight.set_direction(direction);
     }
 
     pub fn get_primitives(&self) -> &Vec<Primitive> {
