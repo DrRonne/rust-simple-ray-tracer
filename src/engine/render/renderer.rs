@@ -945,3 +945,501 @@ impl Renderer {
         return Ok(vec);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::world::World;
+    use crate::engine::util::cframe::Positionable;
+    use image::{ImageBuffer, Rgba};
+    const DEFAULT_WIDTH: u32 = 1280;
+    const DEFAULT_HEIGHT: u32 = 720;
+    const DEFAULT_FOV: f32 = 90.0;
+    const DEFAULT_FOCAL_LENGTH: f32 = 0.1;
+
+    fn create_world() -> World {
+        let mut world = World::new();
+        world
+    }
+
+    fn save_image(
+        data: &[u8],
+        width: u32,
+        height: u32,
+        path: &str,
+    ) {
+        // Assumes RGBA8 format
+        let img = ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, data)
+            .expect("Failed to create image buffer from raw data");
+        img.save(path).expect("Failed to save image");
+    }
+
+    #[test]
+    fn test_render_frame() {
+        // Just testing that renderer doesn't go into error
+        let mut renderer: Renderer = Renderer::new(DEFAULT_WIDTH, DEFAULT_HEIGHT);
+        renderer.init().expect("Failed to initialize renderer");
+        let mut world = create_world();
+        let camera = Camera::new(DEFAULT_FOV, DEFAULT_FOCAL_LENGTH);
+        let directionlight_direction = world.get_direction_light_direction_vec();
+        let directionlight_color = world.get_direction_light_color_vec();
+        world.push_primitive(Primitive::new_sphere(1.0));
+        let result = renderer.render_frame(camera, directionlight_direction, directionlight_color, world.get_primitives());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_render_sphere() {
+        // Test that the rendered sphere results in a circle on the screen
+        let mut renderer: Renderer = Renderer::new(DEFAULT_WIDTH, DEFAULT_HEIGHT);
+        renderer.init().expect("Failed to initialize renderer");
+        let mut world = create_world();
+        world.set_direction_light_direction([0.0, 0.0, -1.0]);
+        let camera = Camera::new(DEFAULT_FOV, DEFAULT_FOCAL_LENGTH);
+        let directionlight_direction = world.get_direction_light_direction_vec();
+        let directionlight_color = world.get_direction_light_color_vec();
+        let mut sphere = Primitive::new_sphere(1.0);
+        let sphere_offset = 5f32;
+        sphere.set_position(0f32, 0f32, -sphere_offset);
+        sphere.set_color([0xFF, 0x00, 0x00]);
+        world.push_primitive(sphere);
+        let colors = renderer.render_frame(camera, directionlight_direction, directionlight_color, world.get_primitives()).expect("failed to render frame");
+        save_image(&colors, DEFAULT_WIDTH, DEFAULT_HEIGHT, "artifacts/render_sphere.png");
+        let center_x = (DEFAULT_WIDTH / 2) as i32;
+        let center_y = (DEFAULT_HEIGHT / 2) as i32;
+
+        let mut found_coordinate = 0;
+        for x in 0..DEFAULT_WIDTH as i32 {
+            let offset = ((DEFAULT_HEIGHT / 2 * DEFAULT_WIDTH + x as u32) * 4) as usize;
+            let pixel = &colors[offset..offset + 4];
+            if pixel[0] > 0 {
+                found_coordinate = x;
+                break;
+            }
+        }
+        let expected_radius = (DEFAULT_WIDTH as f32 / 2.0) as i32 - found_coordinate as i32;
+        let margin = 1;
+        for y in 0..DEFAULT_HEIGHT as i32 {
+            for x in 0..DEFAULT_WIDTH as i32 {
+                let dx = x - center_x;
+                let dy = y - center_y;
+                let dist2 = dx * dx + dy * dy;
+                let offset = ((y as u32 * DEFAULT_WIDTH + x as u32) * 4) as usize;
+                let pixel = &colors[offset..offset + 4];
+
+                if dist2 < (expected_radius - margin) * (expected_radius - margin) {
+                    // Should be sphere color (red)
+                    assert!(pixel[0] > 0 && pixel[1] == 0x00 && pixel[2] == 0x00);
+                } else if dist2 > (expected_radius + margin) * (expected_radius + margin) {
+                    // Should be background (black)
+                    assert!(pixel[0] == 0x00 && pixel[1] == 0x00 && pixel[2] == 0x00);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_render_multiple_spheres() {
+        // Test a scene with multiple spheres
+        let mut renderer: Renderer = Renderer::new(DEFAULT_WIDTH, DEFAULT_HEIGHT);
+        renderer.init().expect("Failed to initialize renderer");
+        let mut world = create_world();
+        world.set_direction_light_direction([0.0, 0.0, -1.0]);
+        let camera = Camera::new(DEFAULT_FOV, DEFAULT_FOCAL_LENGTH);
+        let directionlight_direction = world.get_direction_light_direction_vec();
+        let directionlight_color = world.get_direction_light_color_vec();
+        let mut red_sphere = Primitive::new_sphere(1.0);
+        red_sphere.set_position(0f32, 0f32, -10f32);
+        red_sphere.set_color([0xFF, 0x00, 0x00]);
+        let mut blue_sphere = Primitive::new_sphere(1.0);
+        blue_sphere.set_position(5f32, 5f32, -25f32);
+        blue_sphere.set_color([0x00, 0x00, 0xFF]);
+        let mut green_sphere = Primitive::new_sphere(1.0);
+        green_sphere.set_position(-5f32, -5f32, -37f32);
+        green_sphere.set_color([0x00, 0xFF, 0x00]);
+        let mut yellow_sphere = Primitive::new_sphere(1.0);
+        yellow_sphere.set_position(-3f32, 2f32, -17f32);
+        yellow_sphere.set_color([0xFF, 0xFF, 0x00]);
+        let mut pink_sphere = Primitive::new_sphere(1.0);
+        pink_sphere.set_position(8f32, -2f32, -20f32);
+        pink_sphere.set_color([0xFF, 0x00, 0xFF]);
+        world.push_primitive(red_sphere);
+        world.push_primitive(blue_sphere);
+        world.push_primitive(green_sphere);
+        world.push_primitive(yellow_sphere);
+        world.push_primitive(pink_sphere);
+        let colors = renderer.render_frame(camera, directionlight_direction, directionlight_color, world.get_primitives()).expect("failed to render frame");
+        save_image(&colors, DEFAULT_WIDTH, DEFAULT_HEIGHT, "artifacts/render_multiple_sphere.png");
+
+        let mut red_found = false;
+        let mut green_found = false;
+        let mut blue_found = false;
+        let mut yellow_found = false;
+        let mut pink_found = false;
+        let margin = 10;
+        for y in 0..DEFAULT_HEIGHT as i32 {
+            for x in 0..DEFAULT_WIDTH as i32 {
+                let offset = ((y as u32 * DEFAULT_WIDTH + x as u32) * 4) as usize;
+                let pixel = &colors[offset..offset + 4];
+
+                if pixel[0] >= 0xFF - margin {
+                    if pixel[1] < 0x10 && pixel[2] < 0x10 {
+                        red_found = true;
+                        continue;
+                    } else if pixel[2] >= 0xFF - margin && pixel[1] < 0x10 {
+                        pink_found = true;
+                        continue;
+                    } else if pixel[1] >= 0xFF - margin && pixel[2] < 0x10 {
+                        yellow_found = true;
+                        continue;
+                    }
+                }
+                if pixel[1] >= 0xFF - margin && pixel[2] < 0x10 && pixel[0] < 0x10 {
+                    green_found = true;
+                    continue;
+                } else if pixel[2] >= 0xFF - margin && pixel[0] < 0x10 && pixel[1] < 0x10 {
+                    blue_found = true;
+                    continue;
+                }
+            }
+        }
+        assert!(red_found, "Red sphere not found in rendered image");
+        assert!(green_found, "Green sphere not found in rendered image");
+        assert!(blue_found, "Blue sphere not found in rendered image");
+        assert!(yellow_found, "Yellow sphere not found in rendered image");
+        assert!(pink_found, "Pink sphere not found in rendered image");
+    }
+
+    #[test]
+    fn test_sphere_merge_3D_and_color() {
+        // Test that two spheres that are close together merge into a sort of metaball
+        let mut renderer: Renderer = Renderer::new(DEFAULT_WIDTH, DEFAULT_HEIGHT);
+        renderer.init().expect("Failed to initialize renderer");
+        let mut world = create_world();
+        world.set_direction_light_direction([0.0, 0.0, -1.0]);
+        let camera = Camera::new(DEFAULT_FOV, DEFAULT_FOCAL_LENGTH);
+        let directionlight_direction = world.get_direction_light_direction_vec();
+        let directionlight_color = world.get_direction_light_color_vec();
+        let mut sphere1 = Primitive::new_sphere(1.0);
+        sphere1.set_position(-0.8f32, 0f32, -5f32);
+        sphere1.set_color([0xFF, 0x00, 0x00]);
+        sphere1.set_render_radius(2.0f32);
+        let mut sphere2 = Primitive::new_sphere(1.0);
+        sphere2.set_position(0.8f32, 0f32, -5f32);
+        sphere2.set_color([0x00, 0x00, 0xFF]);
+        sphere2.set_render_radius(2.0f32);
+        let s1 = world.push_primitive(sphere1);
+        let s2 = world.push_primitive(sphere2);
+        world.merge_primitives(s1, s2, 1.0f32);
+        let colors = renderer.render_frame(camera, directionlight_direction, directionlight_color, world.get_primitives()).expect("failed to render frame");
+        save_image(&colors, DEFAULT_WIDTH, DEFAULT_HEIGHT, "artifacts/render_sphere_merge.png");
+
+        let mut found_coordinate = 0;
+        for x in 0..DEFAULT_WIDTH as i32 {
+            let offset = ((DEFAULT_HEIGHT / 2 * DEFAULT_WIDTH + x as u32) * 4) as usize;
+            let pixel = &colors[offset..offset + 4];
+            if pixel[0] > 0 {
+                found_coordinate = x;
+                break;
+            }
+        }
+
+        // Need to use a window because the blending can be a bit noisy
+        let window = 10; // should be even
+        for x in found_coordinate + (window / 2)..(DEFAULT_WIDTH as i32 - found_coordinate - (window / 2)) as i32 {
+            let offset = ((DEFAULT_HEIGHT / 2 * DEFAULT_WIDTH + x as u32) * 4) as usize;
+            let min_offset = offset - ((window / 2) * 4) as usize;
+            let max_offset = offset + ((window / 2) * 4) as usize;
+            let min_pixel = &colors[min_offset..min_offset + 4];
+            let max_pixel = &colors[max_offset..max_offset + 4];
+            let min_n_red = min_pixel[0] as f32 / (min_pixel[0] as f32 + min_pixel[2] as f32);
+            let max_n_red = max_pixel[0] as f32 / (max_pixel[0] as f32 + max_pixel[2] as f32);
+            let min_n_blue = min_pixel[2] as f32 / (min_pixel[0] as f32 + min_pixel[2] as f32);
+            let max_n_blue = max_pixel[2] as f32 / (max_pixel[0] as f32 + max_pixel[2] as f32);
+            assert!(min_n_red > max_n_red, "Red should be decreasing");
+            assert!(min_n_blue < max_n_blue, "Blue should be increasing");
+        }
+
+        // Check that there is not just color blending, but also 3D blending
+        let row = 120; // This is hardcoded at the moment, didn't really feel like doing math on this
+        // Basically, 2 separate spheres would have some empty space in between them
+        // The merge removes this, making it look like 1 object, we can check that there is no empty space on this row of pixels to verify that
+        let mut at_start = false;
+        let mut at_end = false;
+        for x in found_coordinate..(DEFAULT_WIDTH as i32 - found_coordinate) as i32 {
+            let offset = ((row * DEFAULT_WIDTH + x as u32) * 4) as usize;
+            let pixel = &colors[offset..offset + 4];
+            if pixel[0] > 0 || pixel[2] > 0 {
+                if !at_start {
+                    assert!(!at_end, "Found colored pixel after empty space in the middle of the merged sphere");
+                    at_start = true;
+                }
+            } else {
+                if at_start {
+                    at_end = true;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_sphere_merge_transparency() {
+        // Test that two spheres that are close together merge into a sort of metaball
+        // Test that the transparency is blended between the two spheres
+        let mut renderer: Renderer = Renderer::new(DEFAULT_WIDTH, DEFAULT_HEIGHT);
+        renderer.init().expect("Failed to initialize renderer");
+        let mut world = create_world();
+        world.set_direction_light_direction([0.0, 0.0, -1.0]);
+        let camera = Camera::new(DEFAULT_FOV, DEFAULT_FOCAL_LENGTH);
+        let directionlight_direction = world.get_direction_light_direction_vec();
+        let directionlight_color = world.get_direction_light_color_vec();
+        let mut sphere1 = Primitive::new_sphere(1.0);
+        sphere1.set_position(-0.8f32, 0f32, -5f32);
+        sphere1.set_color([0xFF, 0x00, 0x00]);
+        sphere1.set_render_radius(2.0f32);
+        let mut sphere2 = Primitive::new_sphere(1.0);
+        sphere2.set_position(0.8f32, 0f32, -5f32);
+        sphere2.set_color([0xFF, 0x00, 0x00]);
+        sphere2.set_render_radius(2.0f32);
+        sphere2.set_transparency(1.0f32);
+        let s1 = world.push_primitive(sphere1);
+        let s2 = world.push_primitive(sphere2);
+        world.merge_primitives(s1, s2, 1.0f32);
+        let colors = renderer.render_frame(camera, directionlight_direction, directionlight_color, world.get_primitives()).expect("failed to render frame");
+        save_image(&colors, DEFAULT_WIDTH, DEFAULT_HEIGHT, "artifacts/render_sphere_merge_transparency.png");
+
+        let mut found_coordinate = 0;
+        for x in 0..DEFAULT_WIDTH as i32 {
+            let offset = ((DEFAULT_HEIGHT / 2 * DEFAULT_WIDTH + x as u32) * 4) as usize;
+            let pixel = &colors[offset..offset + 4];
+            if pixel[0] > 0 {
+                found_coordinate = x;
+                break;
+            }
+        }
+
+        // Need to use a window because the blending can be a bit noisy
+        let window = 10; // should be even
+        for x in found_coordinate + (window / 2)..(DEFAULT_WIDTH as i32 - found_coordinate - (window / 2)) as i32 {
+            let offset = ((DEFAULT_HEIGHT / 2 * DEFAULT_WIDTH + x as u32) * 4) as usize;
+            let min_offset = offset - ((window / 2) * 4) as usize;
+            let max_offset = offset + ((window / 2) * 4) as usize;
+            let min_pixel = &colors[min_offset..min_offset + 4];
+            let max_pixel = &colors[max_offset..max_offset + 4];
+            assert!(min_pixel[0] > max_pixel[0], "Red should be decreasing");
+        }
+    }
+
+    #[test]
+    fn test_sphere_merge_reflectance() {
+        // Test that two spheres that are close together merge into a sort of metaball
+        // Test that the reflectance is blended between the two spheres
+        let mut renderer: Renderer = Renderer::new(DEFAULT_WIDTH, DEFAULT_HEIGHT);
+        renderer.init().expect("Failed to initialize renderer");
+        let mut world = create_world();
+        world.set_direction_light_direction([0.0, 0.0, -1.0]);
+        let camera = Camera::new(DEFAULT_FOV, DEFAULT_FOCAL_LENGTH);
+        let directionlight_direction = world.get_direction_light_direction_vec();
+        let directionlight_color = world.get_direction_light_color_vec();
+        let mut sphere1 = Primitive::new_sphere(1.0);
+        sphere1.set_position(-0.8f32, 0f32, -5f32);
+        sphere1.set_color([0xFF, 0x00, 0x00]);
+        sphere1.set_render_radius(2.0f32);
+        let mut sphere2 = Primitive::new_sphere(1.0);
+        sphere2.set_position(0.8f32, 0f32, -5f32);
+        sphere2.set_color([0xFF, 0x00, 0x00]);
+        sphere2.set_render_radius(2.0f32);
+        sphere2.set_reflectance(1.0f32);
+        let s1 = world.push_primitive(sphere1);
+        let s2 = world.push_primitive(sphere2);
+        world.merge_primitives(s1, s2, 1.0f32);
+        let colors = renderer.render_frame(camera, directionlight_direction, directionlight_color, world.get_primitives()).expect("failed to render frame");
+        save_image(&colors, DEFAULT_WIDTH, DEFAULT_HEIGHT, "artifacts/render_sphere_merge_reflectance.png");
+
+        let mut found_coordinate = 0;
+        for x in 0..DEFAULT_WIDTH as i32 {
+            let offset = ((DEFAULT_HEIGHT / 2 * DEFAULT_WIDTH + x as u32) * 4) as usize;
+            let pixel = &colors[offset..offset + 4];
+            if pixel[0] > 0 {
+                found_coordinate = x;
+                break;
+            }
+        }
+        // Actually start from the middle of the right sphere to eliminate the diffusing of the light on the left side
+        found_coordinate += (DEFAULT_WIDTH as i32 / 2) - found_coordinate;
+
+        // Need to use a window because the blending can be a bit noisy
+        let window = 10; // should be even
+        for x in found_coordinate + (window / 2)..(DEFAULT_WIDTH as i32 - found_coordinate - (window / 2)) as i32 {
+            let offset = ((DEFAULT_HEIGHT / 2 * DEFAULT_WIDTH + x as u32) * 4) as usize;
+            let min_offset = offset - ((window / 2) * 4) as usize;
+            let max_offset = offset + ((window / 2) * 4) as usize;
+            let min_pixel = &colors[min_offset..min_offset + 4];
+            let max_pixel = &colors[max_offset..max_offset + 4];
+            assert!(min_pixel[0] > max_pixel[0], "Red should be decreasing");
+        }
+    }
+
+    #[test]
+    fn test_solid_shadow() {
+        // Test that a solid object casts a shadow
+        let mut renderer: Renderer = Renderer::new(DEFAULT_WIDTH, DEFAULT_HEIGHT);
+        renderer.init().expect("Failed to initialize renderer");
+        let mut world = create_world();
+        world.set_direction_light_direction([0.0, 0.0, -1.0]);
+        let camera = Camera::new(DEFAULT_FOV, DEFAULT_FOCAL_LENGTH);
+        let directionlight_direction = world.get_direction_light_direction_vec();
+        let directionlight_color = world.get_direction_light_color_vec();
+        let mut sphere = Primitive::new_sphere(1.0);
+        sphere.set_position(0.0f32, 0f32, -5f32);
+        sphere.set_color([0xFF, 0x00, 0x00]);
+        world.push_primitive(sphere);
+        // Put a second sphere behind the camera, a shadow should be cast on the first sphere
+        let mut sphere2 = Primitive::new_sphere(0.5);
+        sphere2.set_position(0.0f32, 0f32, 5f32);
+        world.push_primitive(sphere2);
+        let colors = renderer.render_frame(camera, directionlight_direction, directionlight_color, world.get_primitives()).expect("failed to render frame");
+        save_image(&colors, DEFAULT_WIDTH, DEFAULT_HEIGHT, "artifacts/render_solid_shadow.png");
+
+        let mut found_coordinate = 0;
+        for x in 0..DEFAULT_WIDTH as i32 {
+            let offset = ((DEFAULT_HEIGHT / 2 * DEFAULT_WIDTH + x as u32) * 4) as usize;
+            let pixel = &colors[offset..offset + 4];
+            if pixel[0] > 0 {
+                found_coordinate = x;
+                break;
+            }
+        }
+        let mut inner_edge_found = 0;
+        for x in found_coordinate..(DEFAULT_WIDTH / 2) as i32 {
+            let offset = ((DEFAULT_HEIGHT / 2 * DEFAULT_WIDTH + x as u32) * 4) as usize;
+            let pixel = &colors[offset..offset + 4];
+            if pixel[0] == 0x00 {
+                inner_edge_found = x;
+                break;
+            }
+        }
+
+        let expected_radius = (DEFAULT_WIDTH as f32 / 2.0) as i32 - found_coordinate as i32;
+        let expected_shadow_radius = (DEFAULT_WIDTH as f32 / 2.0) as i32 - inner_edge_found as i32;
+
+        let center_x = (DEFAULT_WIDTH / 2) as i32;
+        let center_y = (DEFAULT_HEIGHT / 2) as i32;
+
+        let margin = 1;
+        for y in 0..DEFAULT_HEIGHT as i32 {
+            for x in 0..DEFAULT_WIDTH as i32 {
+                let dx = x - center_x;
+                let dy = y - center_y;
+                let dist2 = dx * dx + dy * dy;
+                let offset = ((y as u32 * DEFAULT_WIDTH + x as u32) * 4) as usize;
+                let pixel = &colors[offset..offset + 4];
+
+                if dist2 < (expected_shadow_radius - margin) * (expected_shadow_radius - margin) {
+                    // Should be shadow color black
+                    assert!(pixel[0] == 0x00 && pixel[1] == 0x00 && pixel[2] == 0x00);
+                } else if dist2 > (expected_shadow_radius + margin) * (expected_shadow_radius + margin) &&
+                          dist2 < (expected_radius - margin) * (expected_radius - margin) {
+                    // Should be sphere color (red)
+                    assert!(pixel[0] > 0 && pixel[1] == 0x00 && pixel[2] == 0x00);
+                } else if dist2 > (expected_radius + margin) * (expected_radius + margin) {
+                    // Should be background (black)
+                    assert!(pixel[0] == 0x00 && pixel[1] == 0x00 && pixel[2] == 0x00);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_transparent_shadow() {
+        // Test that a transparent object casts a shadow
+        // Stack 2 transparent shadows to check blending
+        let mut renderer: Renderer = Renderer::new(DEFAULT_WIDTH, DEFAULT_HEIGHT);
+        renderer.init().expect("Failed to initialize renderer");
+        let mut world = create_world();
+        world.set_direction_light_direction([0.0, 0.0, -1.0]);
+        let camera = Camera::new(DEFAULT_FOV, DEFAULT_FOCAL_LENGTH);
+        let directionlight_direction = world.get_direction_light_direction_vec();
+        let directionlight_color = world.get_direction_light_color_vec();
+        let mut sphere = Primitive::new_sphere(1.0);
+        sphere.set_position(0.0f32, 0f32, -5f32);
+        sphere.set_color([0xFF, 0xFF, 0xFF]);
+        world.push_primitive(sphere);
+        // Put a second sphere behind the camera, a shadow should be cast on the first sphere
+        let mut sphere2 = Primitive::new_sphere(0.5);
+        sphere2.set_position(0.0f32, 0f32, 5f32);
+        sphere2.set_transparency(0.5f32);
+        sphere2.set_color([0x00, 0xFF, 0x00]);
+        world.push_primitive(sphere2);
+        let mut sphere3 = Primitive::new_sphere(0.25);
+        sphere3.set_position(0.0f32, 0f32, 10f32);
+        sphere3.set_transparency(0.5f32);
+        sphere3.set_color([0x00, 0x00, 0xFF]);
+        world.push_primitive(sphere3);
+        let colors = renderer.render_frame(camera, directionlight_direction, directionlight_color, world.get_primitives()).expect("failed to render frame");
+        save_image(&colors, DEFAULT_WIDTH, DEFAULT_HEIGHT, "artifacts/render_transparent_shadow.png");
+
+        let mut found_coordinate = 0;
+        for x in 0..DEFAULT_WIDTH as i32 {
+            let offset = ((DEFAULT_HEIGHT / 2 * DEFAULT_WIDTH + x as u32) * 4) as usize;
+            let pixel = &colors[offset..offset + 4];
+            if pixel[0] > 0 {
+                found_coordinate = x;
+                break;
+            }
+        }
+        let mut inner_edge_found = 0;
+        for x in (found_coordinate + 10)..(DEFAULT_WIDTH / 2) as i32 {
+            let offset = ((DEFAULT_HEIGHT / 2 * DEFAULT_WIDTH + x as u32) * 4) as usize;
+            let pixel = &colors[offset..offset + 4];
+            if pixel[0] < 120 {
+                inner_edge_found = x;
+                break;
+            }
+        }
+        let mut inner_edge_found2 = 0;
+        for x in inner_edge_found..(DEFAULT_WIDTH / 2) as i32 {
+            let offset = ((DEFAULT_HEIGHT / 2 * DEFAULT_WIDTH + x as u32) * 4) as usize;
+            let pixel = &colors[offset..offset + 4];
+            if pixel[0] < 80 {
+                inner_edge_found2 = x;
+                break;
+            }
+        }
+
+        let expected_radius = (DEFAULT_WIDTH as f32 / 2.0) as i32 - found_coordinate as i32;
+        let expected_shadow_radius = (DEFAULT_WIDTH as f32 / 2.0) as i32 - inner_edge_found as i32;
+        let expected_shadow_radius2 = (DEFAULT_WIDTH as f32 / 2.0) as i32 - inner_edge_found2 as i32;
+
+        let center_x = (DEFAULT_WIDTH / 2) as i32;
+        let center_y = (DEFAULT_HEIGHT / 2) as i32;
+
+        let margin = 5;
+        for y in 0..DEFAULT_HEIGHT as i32 {
+            for x in 0..DEFAULT_WIDTH as i32 {
+                let dx = x - center_x;
+                let dy = y - center_y;
+                let dist2 = dx * dx + dy * dy;
+                let offset = ((y as u32 * DEFAULT_WIDTH + x as u32) * 4) as usize;
+                let pixel = &colors[offset..offset + 4];
+
+                if dist2 < (expected_shadow_radius2 - margin) * (expected_shadow_radius2 - margin) {
+                    // 2 overlapping transparent shadows, should contain very little red, but a bit of green and blue
+                    assert!(pixel[0] < 80 && pixel[1] > 100 && pixel[2] > 100);
+                } else if dist2 > (expected_shadow_radius2 + margin) * (expected_shadow_radius2 + margin) &&
+                          dist2 < (expected_shadow_radius - margin) * (expected_shadow_radius - margin) {
+                    // Just 1 shadow, should contain more red and a lot more green
+                    assert!(pixel[0] > 100 && pixel[1] > 200 && pixel[2] > 100);
+                } else if dist2 > (expected_shadow_radius + margin) * (expected_shadow_radius + margin) &&
+                          dist2 < (expected_radius - margin) * (expected_radius - margin) {
+                    // No shadow, object is white, so all colors should be equal and present
+                    assert!(pixel[0] > 0x00 && pixel[1] > 0x00 && pixel[2] > 0x00);
+                    assert!(pixel[0] == pixel[1] && pixel[1] == pixel[2], "Colors should be equal for white object");
+                } else if dist2 > (expected_radius + margin) * (expected_radius + margin) {
+                    // Outside object, should be black
+                    assert!(pixel[0] == 0x00 && pixel[1] == 0x00 && pixel[2] == 0x00);
+                }
+            }
+        }
+    }
+}
