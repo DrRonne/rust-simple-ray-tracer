@@ -250,7 +250,6 @@ const RENDER_SRC: &str = r#"
                               int index,
                               int *out_blend_indices)
     {
-        Primitive p = primitives[index];
         // Initialize output
         for (int i = 0; i < MAXIMUM_BLENDS; i++) out_blend_indices[i] = -1;
         int blend_count = 1;
@@ -259,6 +258,7 @@ const RENDER_SRC: &str = r#"
         int scan_ptr = 0;
         while (scan_ptr < blend_count && blend_count < MAXIMUM_BLENDS) {
             int current = out_blend_indices[scan_ptr];
+            Primitive p = primitives[current];
             for (int m = 0; m < MAXIMUM_MERGES; m++) {
                 uint merge_idx = p.merge_indices[m];
                 if (p.merge_radii[m] < 0.01f)
