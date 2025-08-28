@@ -4,7 +4,7 @@ use ocl::{ProQue, Buffer, MemFlags};
 use crate::engine::util::error::RendererError;
 use crate::engine::camera::Camera;
 
-use crate::engine::util::octree::octree::Octree;
+use crate::engine::util::octree::octree_node::OctreeNode;
 use crate::engine::primitives::primitive::Primitive;
 
 const RENDER_SRC: &str = r#"
@@ -19,6 +19,25 @@ const RENDER_SRC: &str = r#"
     #define STEP_MARGIN 0.01f // How close the ray needs to get for it to count as an intersection
     #define STEP_MULTIPLIER 0.8f // When the ray closes in on an object, this multiplier will be used to have smaller steps (or bigger if larger than 1.0f)
     #define MAXIMUM_BLENDS 30 // Maximum amount of objects to be used to blend properties
+    #define MAX_OBJECTS_PER_NODE 8 // Maximum amount of objects allowed per octree node
+    #define MAXIMUM_OCTREE_NODE_CHECKS 32 // No matter if there's an object deeper in the octree or further away, it will only do 32 node traversals
+    __constant float OCTREE_SUBNODE_OFFSETS[8][3] = {
+        {0.0, 0.0, 0.0}, // bottom-front-left
+        {1.0, 0.0, 0.0}, // bottom-front-right
+        {0.0, 1.0, 0.0}, // top-front-left
+        {1.0, 1.0, 0.0}, // top-front-right
+        {0.0, 0.0, 1.0}, // bottom-back-left
+        {1.0, 0.0, 1.0}, // bottom-back-right
+        {0.0, 1.0, 1.0}, // top-back-left
+        {1.0, 1.0, 1.0}, // top-back-right
+    };
+
+    typedef struct {
+        uint node_index;
+        float node_size;
+        float node_position[3];
+        float entry_distance;
+    } OctreeStackEntry;
 
     typedef struct {
         float cframe[12];    // 48 bytes
@@ -336,6 +355,8 @@ const RENDER_SRC: &str = r#"
                            float *ray_cframe,
                            float *step_size)
     {
+        // printf("intersection object at index %d with render radius %f and position (%f, %f, %f)\n", index, primitives[index].payload.sphere_data.radius, primitives[index].cframe.x, primitives[index].cframe.y, primitives[index].cframe.z);
+        // printf("ray cframe origin is (%f, %f, %f) with direction (%f, %f, %f)\n", ray_cframe[0], ray_cframe[1], ray_cframe[2], ray_cframe[5], ray_cframe[8], ray_cframe[11]);
         float local_t = 0.0f;
         float step_position[3] = { ray_cframe[0],
                                    ray_cframe[1],
@@ -359,12 +380,331 @@ const RENDER_SRC: &str = r#"
             step_position[1] = ray_cframe[1] - (local_t * ray_cframe[8]);
             step_position[2] = ray_cframe[2] - (local_t * ray_cframe[11]);
             *step_size = merge_sphere_sdf(primitives, index, step_position) * STEP_MULTIPLIER;
+            // printf("step size is %f\n", *step_size);
         }
         return local_t;
     }
 
+    uint select_octree_root_node(__constant uint *octree_root_node_indices,
+                                 __constant float *octree_root_node_position,
+                                 __constant uint *octree_dimensions,
+                                 float octree_root_node_size,
+                                 float *position,
+                                 float *out_position,
+                                 int *out_chunk_indices)
+    {
+        // printf("in select octree root node\n");
+        uint index_x = (uint) ((position[0] - octree_root_node_position[0]) / octree_root_node_size);
+        uint index_y = (uint) ((position[1] - octree_root_node_position[1]) / octree_root_node_size);
+        uint index_z = (uint) ((position[2] - octree_root_node_position[2]) / octree_root_node_size);
+        // printf("index_x: %d, index_y: %d, index_z: %d\n", index_x, index_y, index_z);
+        // printf("octree dimensions: %d, %d, %d\n", octree_dimensions[0], octree_dimensions[1], octree_dimensions[2]);
+        // printf("octree root node position and size: (%f, %f, %f), %f\n",
+        //        octree_root_node_position[0],
+        //        octree_root_node_position[1],
+        //        octree_root_node_position[2],
+        //        octree_root_node_size);
+        // printf("start position is (%f, %f, %f)\n",
+        //        position[0],
+        //        position[1],
+        //        position[2]);
+        float test_difference = position[0] - octree_root_node_position[0];
+        // printf("try again %f %f %f %f\n", position[0], octree_root_node_position[0], test_difference, ((position[0] - octree_root_node_position[0]) / octree_root_node_size));
+
+        if (index_x < octree_dimensions[0] && index_y < octree_dimensions[1] && index_z < octree_dimensions[2])
+        {
+            // printf("Selected root node at (%d, %d, %d)\n", index_x, index_y, index_z);
+            out_position[0] = octree_root_node_position[0] + index_x * octree_root_node_size;
+            out_position[1] = octree_root_node_position[1] + index_y * octree_root_node_size;
+            out_position[2] = octree_root_node_position[2] + index_z * octree_root_node_size;
+            out_chunk_indices[0] = index_x;
+            out_chunk_indices[1] = index_y;
+            out_chunk_indices[2] = index_z;
+            return index_x + index_y * octree_dimensions[0] + index_z * octree_dimensions[0] * octree_dimensions[1];
+        }
+        // printf("try again %f %f %f %f\n", position[0], octree_root_node_position[0], test_difference, ((position[0] - octree_root_node_position[0]) / octree_root_node_size));
+        // printf("Selected root node is out of bounds\n");
+        return 0xFFFFFFFF;
+    }
+
+    bool intersect_objects_in_node(OctreeNode node,
+                                   __constant Primitive* primitives,
+                                   float *ray_cframe,
+                                   float *t,
+                                   int *index_found)
+    {
+        bool found = false;
+        for (int i = 0; i < MAX_OBJECTS_PER_NODE; i++)
+        {
+            if (node.indices[i] == 0xFFFFFFFF)
+                break;
+            // printf("object in node y'all\n");
+            Primitive p = primitives[node.indices[i]];
+            float step_size = 99999.0f;
+            float local_t = intersect_object(primitives, node.indices[i], ray_cframe, &step_size);
+            // printf("intersected object at index %d, local_t = %f, step_size = %f\n", node.indices[i], local_t, step_size);
+            if (local_t < *t && step_size < STEP_MARGIN)
+            {
+                *index_found = node.indices[i];
+                *t = local_t;
+                found = true;
+            }
+        }
+        return found;
+    }
+
+    bool ray_intersects_aabb(float *ray_cframe,
+                             float *aabb_min,
+                             float *aabb_max,
+                             float *out_tmin)
+    {
+        float tmin = -INFINITY, tmax = INFINITY;
+        for (int i = 0; i < 3; i++) {
+            if (fabs(ray_cframe[5 + i*3]) < 1e-8f) {
+                if (-ray_cframe[i] < aabb_min[i] || -ray_cframe[i] > aabb_max[i])
+                    return false; // ray parallel and outside slab
+                // parallel but inside → leave t0=-inf, t1=+inf
+                continue;
+            }
+            float invD = 1.0f / -ray_cframe[5 + (i * 3)];
+            float t0 = (aabb_min[i] - ray_cframe[i]) * invD;
+            float t1 = (aabb_max[i] - ray_cframe[i]) * invD;
+            if (invD < 0.0f) {
+                float tmp = t0; t0 = t1; t1 = tmp;
+            }
+            tmin = fmax(tmin, t0);
+            tmax = fmin(tmax, t1);
+            if (tmax + 1e-6f < tmin) return false;
+        }
+        *out_tmin = tmin;
+        return true;
+    }
+
+    int walk_octree(__constant OctreeNode* nodes,
+                    float octree_root_node_size,
+                    uint root_node_index,
+                    float* root_node_position,
+                    __constant Primitive* primitives,
+                    float *ray_cframe,
+                    float *out_t,
+                    bool debug_mode)
+    {
+        if (debug_mode)
+            printf("\n\n\nWalking octree at root node %d and position (%f, %f, %f)...\n", root_node_index, root_node_position[0], root_node_position[1], root_node_position[2]);
+        int found_index = -1;
+        float current_node_position[3];
+        OctreeStackEntry walk_stack[MAXIMUM_OCTREE_NODE_CHECKS];
+        int stack_ptr = 0;
+        int last_pop_ptr = -1;
+        walk_stack[stack_ptr].node_index = root_node_index;
+        walk_stack[stack_ptr].node_size = octree_root_node_size;
+        walk_stack[stack_ptr].node_position[0] = root_node_position[0];
+        walk_stack[stack_ptr].node_position[1] = root_node_position[1];
+        walk_stack[stack_ptr].node_position[2] = root_node_position[2];
+        walk_stack[stack_ptr].entry_distance = 0.0f;
+        OctreeNode current_node = nodes[root_node_index];
+        float t = 999999;
+        int index_found = -1;
+        int max = 0;
+        while (max < MAXIMUM_OCTREE_NODE_CHECKS)
+        {
+            max++;
+            // printf("at iteration %d\n", max);
+            // Find stack entry with lowest entry_distance
+            // printf("stack pointer is %d\n", stack_ptr);
+            int min_index = -1;
+            float min_distance = t; // node entry cannot be further than closest already found hit
+            for (int i = 0; i <= stack_ptr; i++)
+            {
+                // printf("Considering stack entry %d with distance %f and node index %d\n", i, walk_stack[i].entry_distance, walk_stack[i].node_index);
+                if (walk_stack[i].entry_distance < min_distance)
+                {
+                    min_distance = walk_stack[i].entry_distance;
+                    min_index = i;
+                }
+            }
+            if (debug_mode)
+                printf("Selected node at index %d with entry distance %f and size %f\n", min_index, min_distance, walk_stack[min_index].node_size);
+            if (min_index < 0)
+                break;
+
+            // Pop the entry with the lowest distance
+            OctreeStackEntry entry = walk_stack[min_index];
+            walk_stack[min_index].entry_distance = 9999999; // Set distance high so it doesn't get picked again
+            last_pop_ptr = min_index;
+            // printf("Popped entry at index %d with distance %f and node index %d\n", min_index, entry.entry_distance, entry.node_index);
+
+            OctreeNode current_node = nodes[entry.node_index];
+            float current_node_size = entry.node_size;
+            int node_index_found = -1;
+            bool object_in_node = intersect_objects_in_node(current_node,
+                                                            primitives,
+                                                            ray_cframe,
+                                                            &t,
+                                                            &node_index_found);
+            // if (node_index_found >= 0 && index_found >= 0)
+            //     printf("Found multiple intersections! Previous index %d at t=%f, new index %d at t=%f\n", index_found, *out_t, node_index_found, t);
+            if (object_in_node)
+            {
+                // printf("let's gooooooooo");
+                index_found = node_index_found;
+            }
+
+            for (int i = 0; i < 8; i++)
+            {
+                // printf("looping subnode %d with index 0x%08x (subnode %d)\n", i, current_node.subnode_indices[i], current_node.subnode_indices[i]);
+                if (current_node.subnode_indices[i] == 0xFFFFFFFF)
+                    continue;
+                // printf("non empty node found at index %d, subnode %d\n", i, current_node.subnode_indices[i]);
+                float tmin;
+                float aabb_min[3] = {
+                    entry.node_position[0] + OCTREE_SUBNODE_OFFSETS[i][0] * entry.node_size / 2.0f,
+                    entry.node_position[1] + OCTREE_SUBNODE_OFFSETS[i][1] * entry.node_size / 2.0f,
+                    entry.node_position[2] + OCTREE_SUBNODE_OFFSETS[i][2] * entry.node_size / 2.0f
+                };
+                // printf("node position is [%f, %f, %f], offsets are [%f, %f, %f], aabb_min is [%f, %f, %f]\n", entry.node_position[0], entry.node_position[1], entry.node_position[2], OCTREE_SUBNODE_OFFSETS[i][0], OCTREE_SUBNODE_OFFSETS[i][1], OCTREE_SUBNODE_OFFSETS[i][2], aabb_min[0], aabb_min[1], aabb_min[2]);
+                float aabb_max[3] = {
+                    aabb_min[0] + entry.node_size / 2.0f,
+                    aabb_min[1] + entry.node_size / 2.0f,
+                    aabb_min[2] + entry.node_size / 2.0f
+                };
+                bool intersected = ray_intersects_aabb(ray_cframe, aabb_min, aabb_max, &tmin);
+                if (debug_mode)
+                    printf("intersects? %d, aabb_min: [%f, %f, %f], aabb_max: [%f, %f, %f]\n", intersected, aabb_min[0], aabb_min[1], aabb_min[2], aabb_max[0], aabb_max[1], aabb_max[2]);
+                if (!intersected)
+                    continue;
+                if (last_pop_ptr >= 0)
+                {
+                    // If there is room in the stack where we last popped an entry, we can reuse that slot
+                    // This keeps the stack as small as possible
+                    // printf("overwriting popped ptr at index %d\n", last_pop_ptr);
+                    int using_stack_ptr = last_pop_ptr;
+                    walk_stack[using_stack_ptr].node_index = current_node.subnode_indices[i];
+                    walk_stack[using_stack_ptr].node_size = current_node_size / 2.0f;
+                    walk_stack[using_stack_ptr].node_position[0] = aabb_min[0];
+                    walk_stack[using_stack_ptr].node_position[1] = aabb_min[1];
+                    walk_stack[using_stack_ptr].node_position[2] = aabb_min[2];
+                    walk_stack[using_stack_ptr].entry_distance = tmin;
+                    last_pop_ptr = -1;
+                    // printf("added entry in stack at index %d with entry distance %f\n", using_stack_ptr, tmin);
+                }
+                else {
+                    // printf("pushing new entry onto stack at index %d\n", stack_ptr);
+                    stack_ptr++;
+                    walk_stack[stack_ptr].node_index = current_node.subnode_indices[i];
+                    walk_stack[stack_ptr].node_size = current_node_size / 2.0f;
+                    walk_stack[stack_ptr].node_position[0] = aabb_min[0];
+                    walk_stack[stack_ptr].node_position[1] = aabb_min[1];
+                    walk_stack[stack_ptr].node_position[2] = aabb_min[2];
+                    walk_stack[stack_ptr].entry_distance = tmin;
+                    // printf("added entry in stack at index %d with entry distance %f\n", stack_ptr, tmin);
+                }
+            }
+            // return -1;
+        }
+        // if (max >= 30)
+        //     printf("Max octree checks reached!\n");
+        *out_t = t;
+        return index_found;
+    }
+
+    int walk_chunks(__constant OctreeNode* nodes,
+                    __constant uint *octree_root_node_indices,
+                    __constant float *octree_root_node_position,
+                    __constant uint *octree_dimensions,
+                    float octree_root_node_size,
+                    __constant Primitive* primitives,
+                    float *ray_cframe,
+                    float *out_t,
+                    bool debug_mode)
+    {
+        // printf("walk chunks\n");
+        // 1. Compute starting chunk indices (ix, iy, iz)
+        float start_chunk_pos[3];
+        int start_chunk_indices[3];
+        uint root_node_index = select_octree_root_node(octree_root_node_indices,
+                                                       octree_root_node_position,
+                                                       octree_dimensions,
+                                                       octree_root_node_size,
+                                                       ray_cframe,
+                                                       start_chunk_pos,
+                                                       start_chunk_indices);
+        if (debug_mode)
+            printf("Selected root node %d with position (%f, %f, %f) with cframe pos (%f, %f, %f)\n", root_node_index, start_chunk_pos[0], start_chunk_pos[1], start_chunk_pos[2], ray_cframe[0], ray_cframe[1], ray_cframe[2]);
+        int ix = start_chunk_indices[0];
+        int iy = start_chunk_indices[1];
+        int iz = start_chunk_indices[2];
+
+        // 2. Compute step direction for each axis
+        float dir[3]    = { -ray_cframe[5], -ray_cframe[8], -ray_cframe[11] };
+        int step_x = (dir[0] > 0) ? 1 : -1;
+        int step_y = (dir[1] > 0) ? 1 : -1;
+        int step_z = (dir[2] > 0) ? 1 : -1;
+        if (debug_mode)
+            printf("ray direction is %f %f %f\n", -ray_cframe[5], -ray_cframe[8], -ray_cframe[11]);
+
+        // 3. Compute tMax and tDelta for each axis
+        float next_boundary_x = octree_root_node_position[0] + (ix + (step_x > 0 ? 1 : 0)) * octree_root_node_size;
+        float next_boundary_y = octree_root_node_position[1] + (iy + (step_y > 0 ? 1 : 0)) * octree_root_node_size;
+        float next_boundary_z = octree_root_node_position[2] + (iz + (step_z > 0 ? 1 : 0)) * octree_root_node_size;
+
+        float tMaxX = (dir[0] != 0) ? (next_boundary_x - ray_cframe[0]) / dir[0] : INFINITY;
+        float tMaxY = (dir[1] != 0) ? (next_boundary_y - ray_cframe[1]) / dir[1] : INFINITY;
+        float tMaxZ = (dir[2] != 0) ? (next_boundary_z - ray_cframe[2]) / dir[2] : INFINITY;
+
+        float tDeltaX = (dir[0] != 0) ? octree_root_node_size / fabs(dir[0]) : INFINITY;
+        float tDeltaY = (dir[1] != 0) ? octree_root_node_size / fabs(dir[1]) : INFINITY;
+        float tDeltaZ = (dir[2] != 0) ? octree_root_node_size / fabs(dir[2]) : INFINITY;
+
+        // 4. Traverse chunks
+        int index_found = -1;
+        float t = 999999.0f;
+        while (index_found < 0 &&
+               ix >= 0 && ix < octree_dimensions[0] &&
+               iy >= 0 && iy < octree_dimensions[1] &&
+               iz >= 0 && iz < octree_dimensions[2]) {
+
+            // Traverse the octree in chunk (ix, iy, iz)
+            int chunk_index = octree_root_node_indices[ix + iy * octree_dimensions[0] + iz * octree_dimensions[0] * octree_dimensions[1]];
+            float chunk_min[3] = {
+                octree_root_node_position[0] + ix * octree_root_node_size,
+                octree_root_node_position[1] + iy * octree_root_node_size,
+                octree_root_node_position[2] + iz * octree_root_node_size
+            };
+            if (debug_mode)
+                printf("Traversing chunk %d at (%d, %d, %d) with position (%f, %f, %f)\n", chunk_index, ix, iy, iz, chunk_min[0], chunk_min[1], chunk_min[2]);
+            index_found = walk_octree(nodes,
+                                      octree_root_node_size,
+                                      chunk_index,
+                                      chunk_min,
+                                      primitives,
+                                      ray_cframe,
+                                      &t,
+                                      debug_mode);
+
+            // Step to next chunk
+            if (tMaxX < tMaxY && tMaxX < tMaxZ) {
+                tMaxX += tDeltaX;
+                ix += step_x;
+            } else if (tMaxY < tMaxZ) {
+                tMaxY += tDeltaY;
+                iy += step_y;
+            } else {
+                tMaxZ += tDeltaZ;
+                iz += step_z;
+            }
+        }
+        *out_t = t;
+        return index_found;
+    }
+
     int intersect_objects(__constant Primitive* primitives,
                           unsigned int primitive_amount,
+                          __constant OctreeNode* nodes,
+                          __constant uint *octree_root_node_indices,
+                          __constant float *octree_root_node_position,
+                          __constant uint *octree_dimensions,
+                          float octree_root_node_size,
                           float *ray_cframe,
                           float *out_t,
                           float *out_position,
@@ -372,50 +712,62 @@ const RENDER_SRC: &str = r#"
                           uchar *out_color,
                           float *out_transparency,
                           float *out_reflectance,
-                          float *out_refractive_index)
+                          float *out_refractive_index,
+                          bool debug_mode)
     {
+        // printf("START: ray cframe origin is (%f, %f, %f) with direction (%f, %f, %f)\n", ray_cframe[0], ray_cframe[1], ray_cframe[2], ray_cframe[5], ray_cframe[8], ray_cframe[11]);
         float t = 9999999;
-        int index_found = -1;
-        for (int i = 0; i < primitive_amount; i++)
-        {
-            Primitive p = primitives[i];
-            float local_t = 0.0f;
-            float squared_distance = calculate_squared_distance_point_to_line(p.cframe, ray_cframe);
-            // Use squared distance to avoid unnecessary square root calculation
-            if (squared_distance > p.render_radius * p.render_radius)
-            {
-                // Check if the merged spheres are not too close either
-                int close_merge_found = 0;
-                for (int m = 0; m < MAXIMUM_MERGES; m++)
-                {
-                    int m_index = p.merge_indices[m];
-                    if (p.merge_radii[m] < 0.01f)
-                        break;
-                    float merge_squared_distance = calculate_squared_distance_point_to_line(p.cframe, ray_cframe);
-                    if (merge_squared_distance < p.render_radius * p.render_radius)
-                    {
-                        close_merge_found = 1;
-                        break;
-                    }
-                }
-                if (close_merge_found == 0)
-                {
-                    // No merges close enough
-                    continue;
-                }
-                // continue; // Skip this object if the ray is too far away
-            }
-            float step_size = 99999.0f;
-            local_t = intersect_object(primitives,
-                                       i,
-                                       ray_cframe,
-                                       &step_size);
-            if (local_t < t && step_size < STEP_MARGIN)
-            {
-                index_found = i;
-                t = local_t;
-            }
-        }
+        int index_found = walk_chunks(nodes,
+                                      octree_root_node_indices,
+                                      octree_root_node_position,
+                                      octree_dimensions,
+                                      octree_root_node_size,
+                                      primitives,
+                                      ray_cframe,
+                                      &t,
+                                      debug_mode);
+        // float t = 9999999;
+        // int index_found = -1;
+        // for (int i = 0; i < primitive_amount; i++)
+        // {
+        //     Primitive p = primitives[i];
+        //     float local_t = 0.0f;
+        //     float squared_distance = calculate_squared_distance_point_to_line(p.cframe, ray_cframe);
+        //     // Use squared distance to avoid unnecessary square root calculation
+        //     if (squared_distance > p.render_radius * p.render_radius)
+        //     {
+        //         // Check if the merged spheres are not too close either
+        //         int close_merge_found = 0;
+        //         for (int m = 0; m < MAXIMUM_MERGES; m++)
+        //         {
+        //             int m_index = p.merge_indices[m];
+        //             if (p.merge_radii[m] < 0.01f)
+        //                 break;
+        //             float merge_squared_distance = calculate_squared_distance_point_to_line(p.cframe, ray_cframe);
+        //             if (merge_squared_distance < p.render_radius * p.render_radius)
+        //             {
+        //                 close_merge_found = 1;
+        //                 break;
+        //             }
+        //         }
+        //         if (close_merge_found == 0)
+        //         {
+        //             // No merges close enough
+        //             continue;
+        //         }
+        //         // continue; // Skip this object if the ray is too far away
+        //     }
+        //     float step_size = 99999.0f;
+        //     local_t = intersect_object(primitives,
+        //                                i,
+        //                                ray_cframe,
+        //                                &step_size);
+        //     if (local_t < t && step_size < STEP_MARGIN)
+        //     {
+        //         index_found = i;
+        //         t = local_t;
+        //     }
+        // }
         if (index_found >= 0)
         {
             out_position[0] = ray_cframe[0] - (ray_cframe[5] * t);
@@ -443,17 +795,28 @@ const RENDER_SRC: &str = r#"
                                    float *out_position,
                                    __constant Primitive* primitives,
                                    unsigned int primitive_amount,
+                                   __constant OctreeNode* nodes,
+                                   __constant uint *octree_root_node_indices,
+                                   __constant float *octree_root_node_position,
+                                   __constant uint *octree_dimensions,
+                                   float octree_root_node_size,
                                    float *ray_cframe,
                                    __constant float *directionlight_direction,
                                    __constant uchar *directionlight_color,
                                    float *out_transparency,
                                    float *out_reflectance,
-                                   float *out_refractive_index)
+                                   float *out_refractive_index,
+                                   bool debug_mode)
     {
         float t;
         float edge_pos[3];
         *intersection_index = intersect_objects(primitives,
                                                 primitive_amount,
+                                                nodes,
+                                                octree_root_node_indices,
+                                                octree_root_node_position,
+                                                octree_dimensions,
+                                                octree_root_node_size,
                                                 ray_cframe,
                                                 &t,
                                                 edge_pos,
@@ -461,7 +824,8 @@ const RENDER_SRC: &str = r#"
                                                 out_color,
                                                 out_transparency,
                                                 out_reflectance,
-                                                out_refractive_index);
+                                                out_refractive_index,
+                                                debug_mode);
 
         if (*intersection_index >= 0)
         {
@@ -491,6 +855,8 @@ const RENDER_SRC: &str = r#"
             int shadow_intersections = 0;
             while (shadow_intersections < MAXIMUM_TRANSPARENCY_BOUNCES)
             {
+                if (debug_mode)
+                    printf("TRYING SHADOW");
                 float dl_t;
                 float light_edge_pos[3];
                 float light_normal[3];
@@ -500,6 +866,11 @@ const RENDER_SRC: &str = r#"
                 float shadow_refractive_index;
                 int dl_int_index = intersect_objects(primitives,
                                                      primitive_amount,
+                                                     nodes,
+                                                     octree_root_node_indices,
+                                                     octree_root_node_position,
+                                                     octree_dimensions,
+                                                     octree_root_node_size,
                                                      edge_to_dir_light,
                                                      &dl_t,
                                                      light_edge_pos,
@@ -507,7 +878,8 @@ const RENDER_SRC: &str = r#"
                                                      shadow_color,
                                                      &shadow_transparency,
                                                      &shadow_reflectance,
-                                                     &shadow_refractive_index);
+                                                     &shadow_refractive_index,
+                                                     debug_mode);
                 if (dl_int_index < 0 || (dl_int_index == *intersection_index))
                 {
                     break;
@@ -696,10 +1068,16 @@ const RENDER_SRC: &str = r#"
     void render_pixel(__global uchar *output_buffer,
                       __constant Primitive* primitives,
                       unsigned int primitive_amount,
+                      __constant OctreeNode* nodes,
+                      __constant uint *octree_root_node_indices,
+                      __constant float *octree_root_node_position,
+                      __constant uint *octree_dimensions,
+                      float octree_root_node_size,
                       __constant float *camera_cframe,
                       float *ray_rotation_matrix,
                       __constant float *directionlight_direction,
-                      __constant uchar *directionlight_color)
+                      __constant uchar *directionlight_color,
+                      bool debug_mode)
     {
         float ray_cframe[12] = { camera_cframe[0], camera_cframe[1], camera_cframe[2],
                                  ray_rotation_matrix[0], ray_rotation_matrix[1], ray_rotation_matrix[2],
@@ -746,12 +1124,18 @@ const RENDER_SRC: &str = r#"
                                       result_position,
                                       primitives,
                                       primitive_amount,
+                                      nodes,
+                                      octree_root_node_indices,
+                                      octree_root_node_position,
+                                      octree_dimensions,
+                                      octree_root_node_size,
                                       ray_stack[stack_ptr].cframe,
                                       directionlight_direction,
                                       directionlight_color,
                                       &calc_transparency,
                                       &calc_reflectance,
-                                      &calc_refractive_index);
+                                      &calc_refractive_index,
+                                      debug_mode);
             // if (calc_transparency > 0.1f && calc_transparency < 0.5f)
             if (intersection_index < 0) {
                 // No intersection found, just continue to the next ray in the stack
@@ -827,8 +1211,14 @@ const RENDER_SRC: &str = r#"
                          __constant float *directionlight_direction,
                          __constant uchar *directionlight_color,
                          __constant OctreeNode* nodes,
+                         __constant uint *octree_root_node_indices,
+                         __constant float *octree_root_node_position,
+                         __constant uint *octree_dimensions,
+                         float octree_root_node_size,
                          __constant Primitive* primitives,
                          unsigned int primitive_amount) {
+        int debug_x = (int)(12800.0f * 0.5f);
+        int debug_y = (int)(7200.0f * 0.5f);
         int x = get_global_id(0) % width;
         int y = get_global_id(0) / width;
         float cam_x = - (camera_width / 2) + (((float) x / (float) width) * camera_width);
@@ -841,7 +1231,10 @@ const RENDER_SRC: &str = r#"
         setup_rotation_from_angles(alpha, beta, 0.0f, cam_ray_rotation);
         float cam_ray[] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
         matrix_multiplication(&camera[3], cam_ray_rotation, cam_ray, 3);
-        render_pixel(output_buffer, primitives, primitive_amount, camera, cam_ray, directionlight_direction, directionlight_color);
+        if (x == debug_x && y == debug_y)
+            render_pixel(output_buffer, primitives, primitive_amount, nodes, octree_root_node_indices, octree_root_node_position, octree_dimensions,octree_root_node_size, camera, cam_ray, directionlight_direction, directionlight_color, true);
+        else
+            render_pixel(output_buffer, primitives, primitive_amount, nodes, octree_root_node_indices, octree_root_node_position, octree_dimensions,octree_root_node_size, camera, cam_ray, directionlight_direction, directionlight_color, false);
     }
 "#;
 
@@ -879,7 +1272,18 @@ impl Renderer {
         Ok(())
     }
 
-    pub fn render_frame(&mut self, mut camera: Camera, directionlight_direction: [f32; 3], directionlight_color: [u8; 3], primitives: &Vec<Primitive>) -> Result<Vec::<u8>, RendererError> {
+    pub fn render_frame(
+        &mut self,
+        mut camera: Camera,
+        directionlight_direction: [f32; 3],
+        directionlight_color: [u8; 3],
+        primitives: &Vec<Primitive>,
+        octree_nodes: &Vec<OctreeNode>,
+        octree_root_node_size: f32,
+        octree_root_position: (f32, f32, f32),
+        octree_root_node_indices: &Vec<u32>,
+        octree_dimensions: (u32, u32, u32)
+    ) -> Result<Vec::<u8>, RendererError> {
         let c_width = u16::try_from(self.width).map_err(|_| RendererError::DimensionsTooBigError)?;
         let c_height = u16::try_from(self.height).map_err(|_| RendererError::DimensionsTooBigError)?;
 
@@ -901,11 +1305,29 @@ impl Renderer {
             .copy_host_slice(&directionlight_color)
             .build().map_err(|e| RendererError::CreateBufferError(e))?;
 
-        let mut octree = Octree::new(10f32, 10u32, 10u32, 10u32, (0f32, 0f32, 0f32));
+        // println!("octree content: {:?}", octree_nodes);
         let octree_buffer = Buffer::builder().queue(self.pro_que.as_mut().ok_or(RendererError::RendererNotInitializedError)?.queue().clone())
             .flags(MemFlags::new().read_write())
-            .len(octree.get_nodes().full_len())
-            .copy_host_slice(octree.get_nodes().get_items())
+            .len(octree_nodes.len())
+            .copy_host_slice(octree_nodes)
+            .build().map_err(|e| RendererError::CreateBufferError(e))?;
+
+        let octree_root_node_indices_buffer = Buffer::builder().queue(self.pro_que.as_mut().ok_or(RendererError::RendererNotInitializedError)?.queue().clone())
+            .flags(MemFlags::new().read_write())
+            .len(octree_root_node_indices.len())
+            .copy_host_slice(octree_root_node_indices)
+            .build().map_err(|e| RendererError::CreateBufferError(e))?;
+
+        let octree_root_node_position_buffer = Buffer::builder().queue(self.pro_que.as_mut().ok_or(RendererError::RendererNotInitializedError)?.queue().clone())
+            .flags(MemFlags::new().read_write())
+            .len(3)
+            .copy_host_slice(&[octree_root_position.0, octree_root_position.1, octree_root_position.2])
+            .build().map_err(|e| RendererError::CreateBufferError(e))?;
+
+        let octree_dimensions_buffer = Buffer::builder().queue(self.pro_que.as_mut().ok_or(RendererError::RendererNotInitializedError)?.queue().clone())
+            .flags(MemFlags::new().read_write())
+            .len(3)
+            .copy_host_slice(&[octree_dimensions.0, octree_dimensions.1, octree_dimensions.2])
             .build().map_err(|e| RendererError::CreateBufferError(e))?;
 
         let primitive_buffer = Buffer::builder().queue(self.pro_que.as_mut().ok_or(RendererError::RendererNotInitializedError)?.queue().clone())
@@ -933,6 +1355,10 @@ impl Renderer {
             .arg(directionlight_direction_buffer)
             .arg(directionlight_color_buffer)
             .arg(octree_buffer)
+            .arg(octree_root_node_indices_buffer)
+            .arg(octree_root_node_position_buffer)
+            .arg(octree_dimensions_buffer)
+            .arg(octree_root_node_size)
             .arg(primitive_buffer)
             .arg(primitives.len() as u32)
             .build().map_err(|e| RendererError::AddArgumentsError(e))?;
@@ -984,7 +1410,7 @@ mod tests {
         let directionlight_direction = world.get_direction_light_direction_vec();
         let directionlight_color = world.get_direction_light_color_vec();
         world.push_primitive(Primitive::new_sphere(1.0));
-        let result = renderer.render_frame(camera, directionlight_direction, directionlight_color, world.get_primitives());
+        let result = renderer.render_frame(camera, directionlight_direction, directionlight_color, world.get_primitives(), world.get_octree_nodes(), world.get_octree_root_node_size(), world.get_octree_root_position(), world.get_octree_root_node_indices(), world.get_octree_dimensions());
         assert!(result.is_ok());
     }
 
@@ -1003,7 +1429,8 @@ mod tests {
         sphere.set_position(0f32, 0f32, -sphere_offset);
         sphere.set_color([0xFF, 0x00, 0x00]);
         world.push_primitive(sphere);
-        let colors = renderer.render_frame(camera, directionlight_direction, directionlight_color, world.get_primitives()).expect("failed to render frame");
+        let colors = renderer.render_frame(camera, directionlight_direction, directionlight_color, world.get_primitives(), world.get_octree_nodes(), world.get_octree_root_node_size(), world.get_octree_root_position(), world.get_octree_root_node_indices(), world.get_octree_dimensions()).expect("failed to render frame");
+        // assert_eq!(1, 2);
         save_image(&colors, DEFAULT_WIDTH, DEFAULT_HEIGHT, "artifacts/render_sphere.png");
         let center_x = (DEFAULT_WIDTH / 2) as i32;
         let center_y = (DEFAULT_HEIGHT / 2) as i32;
@@ -1068,7 +1495,7 @@ mod tests {
         world.push_primitive(green_sphere);
         world.push_primitive(yellow_sphere);
         world.push_primitive(pink_sphere);
-        let colors = renderer.render_frame(camera, directionlight_direction, directionlight_color, world.get_primitives()).expect("failed to render frame");
+        let colors = renderer.render_frame(camera, directionlight_direction, directionlight_color, world.get_primitives(), world.get_octree_nodes(), world.get_octree_root_node_size(), world.get_octree_root_position(), world.get_octree_root_node_indices(), world.get_octree_dimensions()).expect("failed to render frame");
         save_image(&colors, DEFAULT_WIDTH, DEFAULT_HEIGHT, "artifacts/render_multiple_sphere.png");
 
         let mut red_found = false;
@@ -1131,7 +1558,7 @@ mod tests {
         let s1 = world.push_primitive(sphere1);
         let s2 = world.push_primitive(sphere2);
         world.merge_primitives(s1, s2, 1.0f32);
-        let colors = renderer.render_frame(camera, directionlight_direction, directionlight_color, world.get_primitives()).expect("failed to render frame");
+        let colors = renderer.render_frame(camera, directionlight_direction, directionlight_color, world.get_primitives(), world.get_octree_nodes(), world.get_octree_root_node_size(), world.get_octree_root_position(), world.get_octree_root_node_indices(), world.get_octree_dimensions()).expect("failed to render frame");
         save_image(&colors, DEFAULT_WIDTH, DEFAULT_HEIGHT, "artifacts/render_sphere_merge.png");
 
         let mut found_coordinate = 0;
@@ -1205,7 +1632,7 @@ mod tests {
         let s1 = world.push_primitive(sphere1);
         let s2 = world.push_primitive(sphere2);
         world.merge_primitives(s1, s2, 1.0f32);
-        let colors = renderer.render_frame(camera, directionlight_direction, directionlight_color, world.get_primitives()).expect("failed to render frame");
+        let colors = renderer.render_frame(camera, directionlight_direction, directionlight_color, world.get_primitives(), world.get_octree_nodes(), world.get_octree_root_node_size(), world.get_octree_root_position(), world.get_octree_root_node_indices(), world.get_octree_dimensions()).expect("failed to render frame");
         save_image(&colors, DEFAULT_WIDTH, DEFAULT_HEIGHT, "artifacts/render_sphere_merge_transparency.png");
 
         let mut found_coordinate = 0;
@@ -1234,6 +1661,7 @@ mod tests {
     fn test_sphere_merge_reflectance() {
         // Test that two spheres that are close together merge into a sort of metaball
         // Test that the reflectance is blended between the two spheres
+        // TODO: when nothing renders, this also passes
         let mut renderer: Renderer = Renderer::new(DEFAULT_WIDTH, DEFAULT_HEIGHT);
         renderer.init().expect("Failed to initialize renderer");
         let mut world = create_world();
@@ -1253,7 +1681,7 @@ mod tests {
         let s1 = world.push_primitive(sphere1);
         let s2 = world.push_primitive(sphere2);
         world.merge_primitives(s1, s2, 1.0f32);
-        let colors = renderer.render_frame(camera, directionlight_direction, directionlight_color, world.get_primitives()).expect("failed to render frame");
+        let colors = renderer.render_frame(camera, directionlight_direction, directionlight_color, world.get_primitives(), world.get_octree_nodes(), world.get_octree_root_node_size(), world.get_octree_root_position(), world.get_octree_root_node_indices(), world.get_octree_dimensions()).expect("failed to render frame");
         save_image(&colors, DEFAULT_WIDTH, DEFAULT_HEIGHT, "artifacts/render_sphere_merge_reflectance.png");
 
         let mut found_coordinate = 0;
@@ -1283,6 +1711,7 @@ mod tests {
     #[test]
     fn test_solid_shadow() {
         // Test that a solid object casts a shadow
+        // TODO: when nothing renders, this also passes...
         let mut renderer: Renderer = Renderer::new(DEFAULT_WIDTH, DEFAULT_HEIGHT);
         renderer.init().expect("Failed to initialize renderer");
         let mut world = create_world();
@@ -1298,7 +1727,7 @@ mod tests {
         let mut sphere2 = Primitive::new_sphere(0.5);
         sphere2.set_position(0.0f32, 0f32, 5f32);
         world.push_primitive(sphere2);
-        let colors = renderer.render_frame(camera, directionlight_direction, directionlight_color, world.get_primitives()).expect("failed to render frame");
+        let colors = renderer.render_frame(camera, directionlight_direction, directionlight_color, world.get_primitives(), world.get_octree_nodes(), world.get_octree_root_node_size(), world.get_octree_root_position(), world.get_octree_root_node_indices(), world.get_octree_dimensions()).expect("failed to render frame");
         save_image(&colors, DEFAULT_WIDTH, DEFAULT_HEIGHT, "artifacts/render_solid_shadow.png");
 
         let mut found_coordinate = 0;
@@ -1357,7 +1786,7 @@ mod tests {
         let mut renderer: Renderer = Renderer::new(DEFAULT_WIDTH, DEFAULT_HEIGHT);
         renderer.init().expect("Failed to initialize renderer");
         let mut world = create_world();
-        world.set_direction_light_direction([0.0, 0.0, -1.0]);
+        world.set_direction_light_direction([0.01 / ((0.01 * 0.01 * 2.0 + 1.0) as f32).sqrt(), 0.01 / ((0.01 * 0.01 * 2.0 + 1.0) as f32).sqrt(), -1.0 / ((0.01 * 0.01 * 2.0 + 1.0) as f32).sqrt()]);
         let camera = Camera::new(DEFAULT_FOV, DEFAULT_FOCAL_LENGTH);
         let directionlight_direction = world.get_direction_light_direction_vec();
         let directionlight_color = world.get_direction_light_color_vec();
@@ -1376,7 +1805,7 @@ mod tests {
         sphere3.set_transparency(0.5f32);
         sphere3.set_color([0x00, 0x00, 0xFF]);
         world.push_primitive(sphere3);
-        let colors = renderer.render_frame(camera, directionlight_direction, directionlight_color, world.get_primitives()).expect("failed to render frame");
+        let colors = renderer.render_frame(camera, directionlight_direction, directionlight_color, world.get_primitives(), world.get_octree_nodes(), world.get_octree_root_node_size(), world.get_octree_root_position(), world.get_octree_root_node_indices(), world.get_octree_dimensions()).expect("failed to render frame");
         save_image(&colors, DEFAULT_WIDTH, DEFAULT_HEIGHT, "artifacts/render_transparent_shadow.png");
 
         let mut found_coordinate = 0;

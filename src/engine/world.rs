@@ -1,7 +1,8 @@
 use crate::engine::lights::directionlight::DirectionLight;
-use crate::engine::util::octree::octree::Octree;
+use crate::engine::util::octree::{octree::Octree, octree_node::OctreeNode};
 use crate::engine::util::tombstoned_list::TombstonedList;
 use crate::engine::primitives::primitive::Primitive;
+use crate::engine::util::cframe::Positionable;
 
 const MAX_MERGES: u32 = 6;
 
@@ -21,7 +22,9 @@ impl World {
     }
 
     pub fn push_primitive(&mut self, primitive: Primitive) -> usize {
-        self.primitives.add(primitive)
+        let index = self.primitives.add(primitive);
+        self.octree.move_item(index as u32, primitive.get_position().0, primitive.get_position().1, primitive.get_position().2, primitive.get_render_radius(), None);
+        index
     }
 
     pub fn get_direction_light_direction_vec(&self) ->[f32; 3] {
@@ -57,5 +60,34 @@ impl World {
                 p1.remove_merge(index2 as u32);
             }
         }
+    }
+
+    pub fn set_primitive_position(&mut self, index: usize, position: [f32; 3]) {
+        if let Some(primitive) = self.primitives.get_mut(index) {
+            self.octree.move_item(index as u32, position[0], position[1], position[2], primitive.get_render_radius(), Some(primitive.get_position()));
+            primitive.set_position(position[0], position[1], position[2]);
+        } else {
+            println!("WARNING: Attempting to set position of primitive (index {}) that does not exist!", index);
+        }
+    }
+
+    pub fn get_octree_nodes(&self) -> &Vec<OctreeNode> {
+        self.octree.get_nodes().get_items()
+    }
+
+    pub fn get_octree_root_position(&self) -> (f32, f32, f32) {
+        self.octree.get_root_position()
+    }
+
+    pub fn get_octree_root_node_indices(&self) -> &Vec<u32> {
+        self.octree.get_root_node_indices()
+    }
+
+    pub fn get_octree_root_node_size(&self) -> f32 {
+        self.octree.get_root_node_size()
+    }
+
+    pub fn get_octree_dimensions(&self) -> (u32, u32, u32) {
+        (self.octree.get_width(), self.octree.get_height(), self.octree.get_depth())
     }
 }

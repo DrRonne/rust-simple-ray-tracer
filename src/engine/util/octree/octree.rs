@@ -71,6 +71,30 @@ impl Octree {
         &self.nodes
     }
 
+    pub fn get_root_node_indices(&self) -> &Vec<u32> {
+        &self.root_node_indices
+    }
+
+    pub fn get_root_position(&self) -> (f32, f32, f32) {
+        self.root_position
+    }
+
+    pub fn get_root_node_size(&self) -> f32 {
+        self.root_node_size
+    }
+
+    pub fn get_width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn get_height(&self) -> u32 {
+        self.height
+    }
+
+    pub fn get_depth(&self) -> u32 {
+        self.depth
+    }
+
     pub fn get_root_node_by_position(
         &self,
         pos_x: f32,
@@ -146,7 +170,7 @@ impl Octree {
         // Optionally handle previous position to move object out of subnode
         let mut to_be_removed = true;
         let mut to_be_added_mut = to_be_added;
-        let mut node = self.nodes.get_mut(node_index).expect("Node should exist");
+        let node = self.nodes.get_mut(node_index).expect("Node should exist");
         if let Some((_prev_x, _prev_y, _prev_z)) = previous_pos {
             if node.remove_item(item_id) {
                 to_be_removed = false;
@@ -394,9 +418,9 @@ mod tests {
     #[test]
     fn test_new_octree() {
         let tree = Octree::new(DEFAULT_NODE_SIZE, DEFAULT_OCTREE_WIDTH, DEFAULT_OCTREE_HEIGHT, DEFAULT_OCTREE_DEPTH, (DEFAULT_POS_X, DEFAULT_POS_Y, DEFAULT_POS_Z));
-        assert_eq!(tree.root_node_size, DEFAULT_NODE_SIZE);
-        assert_eq!(tree.root_position, (DEFAULT_POS_X, DEFAULT_POS_Y, DEFAULT_POS_Z));
-        assert_eq!(tree.root_node_indices.len(), 1);
+        assert_eq!(tree.get_root_node_size(), DEFAULT_NODE_SIZE);
+        assert_eq!(tree.get_root_position(), (DEFAULT_POS_X, DEFAULT_POS_Y, DEFAULT_POS_Z));
+        assert_eq!(tree.get_root_node_indices().len(), 1);
         let (root_index, x, y, z) = tree.get_root_node_by_position(DEFAULT_POS_X, DEFAULT_POS_Y, DEFAULT_POS_Z).expect("Root node should exist");
         assert_eq!((x, y, z), (DEFAULT_POS_X, DEFAULT_POS_Y, DEFAULT_POS_Z));
         assert_eq!(root_index, 0);
@@ -980,8 +1004,8 @@ mod tests {
         let mut tree = Octree::new(DEFAULT_NODE_SIZE, DEFAULT_OCTREE_WIDTH * 2, DEFAULT_OCTREE_HEIGHT * 2, DEFAULT_OCTREE_DEPTH * 2, (DEFAULT_POS_X, DEFAULT_POS_Y, DEFAULT_POS_Z));
         // Put item in the middle of the chunks so it overlaps with all 8 root nodes
         tree.move_item(1, DEFAULT_POS_X + DEFAULT_NODE_SIZE, DEFAULT_POS_Y + DEFAULT_NODE_SIZE, DEFAULT_POS_Z + DEFAULT_NODE_SIZE, DEFAULT_NODE_SIZE * 0.6, None);
-        for root_node_index in tree.root_node_indices {
-            let node = tree.nodes.get(root_node_index as usize).expect("Root node should exist");
+        for root_node_index in tree.get_root_node_indices() {
+            let node = tree.nodes.get(root_node_index.clone() as usize).expect("Root node should exist");
             // node should contain the item
             assert_eq!(node.indices[0], 1);
             // All other indices in the node should be empty
@@ -1001,8 +1025,8 @@ mod tests {
         // Put item in the middle of the chunks so it overlaps with all 8 root nodes
         // Make it small enough so it's one subnode layer down
         tree.move_item(1, DEFAULT_POS_X + DEFAULT_NODE_SIZE, DEFAULT_POS_Y + DEFAULT_NODE_SIZE, DEFAULT_POS_Z + DEFAULT_NODE_SIZE, DEFAULT_NODE_SIZE * 0.3, None);
-        for root_node_index in tree.root_node_indices {
-            let node = tree.nodes.get(root_node_index as usize).expect("Root node should exist");
+        for root_node_index in tree.get_root_node_indices() {
+            let node = tree.nodes.get(root_node_index.clone() as usize).expect("Root node should exist");
             // node should not contain the item
             for i in 0..8 {
                 assert_eq!(node.indices[i], u32::MAX);

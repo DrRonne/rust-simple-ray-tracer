@@ -250,7 +250,7 @@ fn main() -> Result<(), Error> {
                     let directionlight_direction = world.get_direction_light_direction_vec();
                     let directionlight_color = world.get_direction_light_color_vec();
                     let primitives = world.get_primitives();
-                    let mut vec = renderer.render_frame(camera, directionlight_direction, directionlight_color, primitives).expect("failed to render frame");
+                    let mut vec = renderer.render_frame(camera, directionlight_direction, directionlight_color, primitives, world.get_octree_nodes(), world.get_octree_root_node_size(), world.get_octree_root_position(), world.get_octree_root_node_indices(), world.get_octree_dimensions()).expect("failed to render frame");
                     let frame = pixels.frame_mut();
                     frame.copy_from_slice(&mut vec[..]);
                     if let Err(err) = pixels.render() {

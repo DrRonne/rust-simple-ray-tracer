@@ -90,6 +90,10 @@ impl CFrame {
     pub fn get_up(&self) -> (f32, f32, f32) {
         (self.r01, self.r11, self.r21)
     }
+
+    pub fn get_position(&self) -> (f32, f32, f32) {
+        (self.x, self.y, self.z)
+    }
 }
 
 impl Default for CFrame {
@@ -106,4 +110,6 @@ impl Default for CFrame {
 pub trait Positionable {
     fn set_cframe(&mut self, cframe: CFrame);
     fn set_position(&mut self, x: f32, y: f32, z: f32);
+    fn get_cframe(&self) -> CFrame;
+    fn get_position(&self) -> (f32, f32, f32);
 }

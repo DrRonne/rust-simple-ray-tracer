@@ -89,16 +89,32 @@ impl Primitive {
         self.color = color;
     }
 
+    pub fn get_color(&self) -> [u8; 3] {
+        self.color
+    }
+
     pub fn set_transparency(&mut self, transparency: f32) {
         self.transparency = transparency;
+    }
+
+    pub fn get_transparency(&self) -> f32 {
+        self.transparency
     }
 
     pub fn set_refractive_index(&mut self, refractive_index: f32) {
         self.refractive_index = refractive_index;
     }
 
+    pub fn get_refractive_index(&self) -> f32 {
+        self.refractive_index
+    }
+
     pub fn set_reflectance(&mut self, reflectance: f32) {
         self.reflectance = reflectance;
+    }
+
+    pub fn get_reflectance(&self) -> f32 {
+        self.reflectance
     }
 
     // The render radius should never be set to something smaller than the maximum span an object can have!
@@ -106,6 +122,10 @@ impl Primitive {
     // If the render radius is set smaller than the maximum span of the object, the ray could exclude it from its calculations while it really should be excluded!
     pub fn set_render_radius(&mut self, render_radius: f32) {
         self.render_radius = render_radius;
+    }
+
+    pub fn get_render_radius(&self) -> f32 {
+        self.render_radius
     }
 
     pub fn set_radius(&mut self, radius: f32) {
@@ -140,8 +160,6 @@ impl Primitive {
             if self.merge_radii[i] < 0.01f32 {
                 self.merge_radii[i] = merge_radius;
                 self.merge_indices[i] = merge_index;
-                println!("merge indices: {:?}", self.merge_indices);
-                println!("merge radii: {:?}", self.merge_radii);
                 return;
             }
         }
@@ -190,6 +208,14 @@ impl Positionable for Primitive {
     fn set_cframe(&mut self, cframe: CFrame) {
         self.cframe = cframe;
     }
+
+    fn get_position(&self) -> (f32, f32, f32) {
+        self.cframe.get_position()
+    }
+
+    fn get_cframe(&self) -> CFrame {
+        self.cframe
+    }
 }
 
 // SAFETY: OctreeNode is plain-old-data (POD) and contains only OclPrm-compatible fields.
@@ -222,54 +248,50 @@ mod tests {
     }
 
     #[test]
-    fn test_set_color() {
+    fn test_set_get_color() {
         let mut s = Primitive::new_sphere(DEFAULT_RADIUS);
         s.set_color([0x00, 0xFF, 0xFA]);
-        assert_eq!(s.color, [0x00, 0xFF, 0xFA]);
+        assert_eq!(s.get_color(), [0x00, 0xFF, 0xFA]);
     }
 
     #[test]
-    fn test_set_transparency() {
+    fn test_set_get_transparency() {
         let mut s = Primitive::new_sphere(DEFAULT_RADIUS);
         s.set_transparency(0.5f32);
-        assert_eq!(s.transparency, 0.5f32);
+        assert_eq!(s.get_transparency(), 0.5f32);
     }
 
     #[test]
-    fn test_set_reflectance() {
+    fn test_set_get_reflectance() {
         let mut s = Primitive::new_sphere(DEFAULT_RADIUS);
         s.set_reflectance(0.5f32);
-        assert_eq!(s.reflectance, 0.5f32);
+        assert_eq!(s.get_reflectance(), 0.5f32);
     }
 
     #[test]
-    fn test_set_refractive_index() {
+    fn test_set_get_refractive_index() {
         let mut s = Primitive::new_sphere(DEFAULT_RADIUS);
         s.set_refractive_index(0.5f32);
-        assert_eq!(s.refractive_index, 0.5f32);
+        assert_eq!(s.get_refractive_index(), 0.5f32);
     }
 
     #[test]
-    fn test_set_render_radius() {
+    fn test_set_get_render_radius() {
         let mut s = Primitive::new_sphere(DEFAULT_RADIUS);
         s.set_render_radius(0.5f32);
-        assert_eq!(s.render_radius, 0.5f32);
+        assert_eq!(s.get_render_radius(), 0.5f32);
     }
 
     #[test]
-    fn test_set_position() {
+    fn test_set_get_position() {
         let mut s = Primitive::new_sphere(DEFAULT_RADIUS);
         let position = (1f32, 2f32, 3f32);
         s.set_position(position.0, position.1, position.2);
-        let mut comp = CFrame::default();
-        comp.x = position.0;
-        comp.y = position.1;
-        comp.z = position.2;
-        assert_eq!(s.cframe, comp);
+        assert_eq!(s.get_position(), position);
     }
 
     #[test]
-    fn test_set_cframe() {
+    fn test_set_get_cframe() {
         let mut s = Primitive::new_sphere(DEFAULT_RADIUS);
         let angles = (0.1f32, 0.2f32, 0.3f32);
         let vector = (10f32, 20f32, 30f32);
@@ -277,7 +299,7 @@ mod tests {
         res.multiply_angles(angles.0, angles.1, angles.2);
         res.multiply_vector(vector.0, vector.1, vector.2);
         s.set_cframe(res);
-        assert_eq!(s.cframe, res);
+        assert_eq!(s.get_cframe(), res);
     }
 
     #[test]
