@@ -20,7 +20,7 @@ const RENDER_SRC: &str = r#"
     #define STEP_MULTIPLIER 0.8f // When the ray closes in on an object, this multiplier will be used to have smaller steps (or bigger if larger than 1.0f)
     #define MAXIMUM_BLENDS 30 // Maximum amount of objects to be used to blend properties
     #define MAX_OBJECTS_PER_NODE 8 // Maximum amount of objects allowed per octree node
-    #define MAXIMUM_OCTREE_NODE_CHECKS 32 // No matter if there's an object deeper in the octree or further away, it will only do 32 node traversals
+    #define MAXIMUM_OCTREE_NODE_CHECKS 16 // No matter if there's an object deeper in the octree or further away, it will only do 16 node traversals
     __constant float OCTREE_SUBNODE_OFFSETS[8][3] = {
         {0.0, 0.0, 0.0}, // bottom-front-left
         {1.0, 0.0, 0.0}, // bottom-front-right
@@ -34,9 +34,9 @@ const RENDER_SRC: &str = r#"
 
     typedef struct {
         uint node_index;
+        float tmin, tmax;
+        float node_center[3];
         float node_size;
-        float node_position[3];
-        float entry_distance;
     } OctreeStackEntry;
 
     typedef struct {
@@ -427,11 +427,11 @@ const RENDER_SRC: &str = r#"
         return 0xFFFFFFFF;
     }
 
-    bool intersect_objects_in_node(OctreeNode node,
-                                   __constant Primitive* primitives,
-                                   float *ray_cframe,
-                                   float *t,
-                                   int *index_found)
+    inline bool intersect_objects_in_node(OctreeNode node,
+                                          __constant Primitive* primitives,
+                                          float *ray_cframe,
+                                          float *t,
+                                          int *index_found)
     {
         bool found = false;
         for (int i = 0; i < MAX_OBJECTS_PER_NODE; i++)
@@ -456,7 +456,8 @@ const RENDER_SRC: &str = r#"
     bool ray_intersects_aabb(float *ray_cframe,
                              float *aabb_min,
                              float *aabb_max,
-                             float *out_tmin)
+                             float *out_tmin,
+                             float *out_tmax)
     {
         float tmin = -INFINITY, tmax = INFINITY;
         for (int i = 0; i < 3; i++) {
@@ -477,6 +478,7 @@ const RENDER_SRC: &str = r#"
             if (tmax + 1e-6f < tmin) return false;
         }
         *out_tmin = tmin;
+        *out_tmax = tmax;
         return true;
     }
 
@@ -489,123 +491,191 @@ const RENDER_SRC: &str = r#"
                     float *out_t,
                     bool debug_mode)
     {
-        if (debug_mode)
-            printf("\n\n\nWalking octree at root node %d and position (%f, %f, %f)...\n", root_node_index, root_node_position[0], root_node_position[1], root_node_position[2]);
-        int found_index = -1;
-        float current_node_position[3];
-        OctreeStackEntry walk_stack[MAXIMUM_OCTREE_NODE_CHECKS];
-        int stack_ptr = 0;
-        int last_pop_ptr = -1;
-        walk_stack[stack_ptr].node_index = root_node_index;
-        walk_stack[stack_ptr].node_size = octree_root_node_size;
-        walk_stack[stack_ptr].node_position[0] = root_node_position[0];
-        walk_stack[stack_ptr].node_position[1] = root_node_position[1];
-        walk_stack[stack_ptr].node_position[2] = root_node_position[2];
-        walk_stack[stack_ptr].entry_distance = 0.0f;
-        OctreeNode current_node = nodes[root_node_index];
-        float t = 999999;
-        int index_found = -1;
-        int max = 0;
-        while (max < MAXIMUM_OCTREE_NODE_CHECKS)
-        {
-            max++;
-            // printf("at iteration %d\n", max);
-            // Find stack entry with lowest entry_distance
-            // printf("stack pointer is %d\n", stack_ptr);
-            int min_index = -1;
-            float min_distance = t; // node entry cannot be further than closest already found hit
-            for (int i = 0; i <= stack_ptr; i++)
-            {
-                // printf("Considering stack entry %d with distance %f and node index %d\n", i, walk_stack[i].entry_distance, walk_stack[i].node_index);
-                if (walk_stack[i].entry_distance < min_distance)
-                {
-                    min_distance = walk_stack[i].entry_distance;
-                    min_index = i;
-                }
-            }
-            if (debug_mode)
-                printf("Selected node at index %d with entry distance %f and size %f\n", min_index, min_distance, walk_stack[min_index].node_size);
-            if (min_index < 0)
-                break;
+        // Ray: origin o and (forward) direction d
+        const float o0 = ray_cframe[0], o1 = ray_cframe[1], o2 = ray_cframe[2];
+        const float d0 = -ray_cframe[5], d1 = -ray_cframe[8], d2 = -ray_cframe[11];
 
-            // Pop the entry with the lowest distance
-            OctreeStackEntry entry = walk_stack[min_index];
-            walk_stack[min_index].entry_distance = 9999999; // Set distance high so it doesn't get picked again
-            last_pop_ptr = min_index;
-            // printf("Popped entry at index %d with distance %f and node index %d\n", min_index, entry.entry_distance, entry.node_index);
+        // inv_dir (guard zero -> +/-INF)
+        float inv_dir0 = 1.0f / d0; inv_dir0 = isfinite(inv_dir0) ? inv_dir0 : copysign(INFINITY, d0);
+        float inv_dir1 = 1.0f / d1; inv_dir1 = isfinite(inv_dir1) ? inv_dir1 : copysign(INFINITY, d1);
+        float inv_dir2 = 1.0f / d2; inv_dir2 = isfinite(inv_dir2) ? inv_dir2 : copysign(INFINITY, d2);
 
-            OctreeNode current_node = nodes[entry.node_index];
-            float current_node_size = entry.node_size;
+        // root AABB test
+        float t_root_min, t_root_max;
+        float root_aabb_max[3] = {
+            root_node_position[0] + octree_root_node_size,
+            root_node_position[1] + octree_root_node_size,
+            root_node_position[2] + octree_root_node_size
+        };
+        bool hits = ray_intersects_aabb(ray_cframe, root_node_position, root_aabb_max, &t_root_min, &t_root_max);
+        if (!hits) return -1;
+
+        // stack
+        OctreeStackEntry stack[MAXIMUM_OCTREE_NODE_CHECKS];
+        int sp = 0;
+
+        // push root
+        stack[sp].node_index = root_node_index;
+        stack[sp].tmin = t_root_min;
+        stack[sp].tmax = t_root_max;
+        stack[sp].node_size = octree_root_node_size;
+        stack[sp].node_center[0] = root_node_position[0] + 0.5f * octree_root_node_size;
+        stack[sp].node_center[1] = root_node_position[1] + 0.5f * octree_root_node_size;
+        stack[sp].node_center[2] = root_node_position[2] + 0.5f * octree_root_node_size;
+        sp++;
+
+        float bestT = INFINITY;
+        int bestPrim = -1;
+        int iter = 0;
+
+        while (sp > 0) {
+            iter++;
+            // pop nearest candidate (your invariant: top is nearest)
+            OctreeStackEntry entry = stack[--sp];
+
+            // quick prune
+            if (entry.tmin > bestT) continue;          // no better hit in this node
+            if (entry.tmax < 0.0f) continue;           // node is behind ray start
+
+            OctreeNode node = nodes[entry.node_index];
+
             int node_index_found = -1;
+            OctreeNode current_node = nodes[entry.node_index];
             bool object_in_node = intersect_objects_in_node(current_node,
                                                             primitives,
                                                             ray_cframe,
-                                                            &t,
+                                                            &bestT,
                                                             &node_index_found);
-            // if (node_index_found >= 0 && index_found >= 0)
-            //     printf("Found multiple intersections! Previous index %d at t=%f, new index %d at t=%f\n", index_found, *out_t, node_index_found, t);
             if (object_in_node)
             {
                 // printf("let's gooooooooo");
-                index_found = node_index_found;
+                bestPrim = node_index_found;
+                break; // This break may break certain cases...
             }
 
-            for (int i = 0; i < 8; i++)
-            {
-                // printf("looping subnode %d with index 0x%08x (subnode %d)\n", i, current_node.subnode_indices[i], current_node.subnode_indices[i]);
-                if (current_node.subnode_indices[i] == 0xFFFFFFFF)
-                    continue;
-                // printf("non empty node found at index %d, subnode %d\n", i, current_node.subnode_indices[i]);
-                float tmin;
-                float aabb_min[3] = {
-                    entry.node_position[0] + OCTREE_SUBNODE_OFFSETS[i][0] * entry.node_size / 2.0f,
-                    entry.node_position[1] + OCTREE_SUBNODE_OFFSETS[i][1] * entry.node_size / 2.0f,
-                    entry.node_position[2] + OCTREE_SUBNODE_OFFSETS[i][2] * entry.node_size / 2.0f
-                };
-                // printf("node position is [%f, %f, %f], offsets are [%f, %f, %f], aabb_min is [%f, %f, %f]\n", entry.node_position[0], entry.node_position[1], entry.node_position[2], OCTREE_SUBNODE_OFFSETS[i][0], OCTREE_SUBNODE_OFFSETS[i][1], OCTREE_SUBNODE_OFFSETS[i][2], aabb_min[0], aabb_min[1], aabb_min[2]);
-                float aabb_max[3] = {
-                    aabb_min[0] + entry.node_size / 2.0f,
-                    aabb_min[1] + entry.node_size / 2.0f,
-                    aabb_min[2] + entry.node_size / 2.0f
-                };
-                bool intersected = ray_intersects_aabb(ray_cframe, aabb_min, aabb_max, &tmin);
-                if (debug_mode)
-                    printf("intersects? %d, aabb_min: [%f, %f, %f], aabb_max: [%f, %f, %f]\n", intersected, aabb_min[0], aabb_min[1], aabb_min[2], aabb_max[0], aabb_max[1], aabb_max[2]);
-                if (!intersected)
-                    continue;
-                if (last_pop_ptr >= 0)
-                {
-                    // If there is room in the stack where we last popped an entry, we can reuse that slot
-                    // This keeps the stack as small as possible
-                    // printf("overwriting popped ptr at index %d\n", last_pop_ptr);
-                    int using_stack_ptr = last_pop_ptr;
-                    walk_stack[using_stack_ptr].node_index = current_node.subnode_indices[i];
-                    walk_stack[using_stack_ptr].node_size = current_node_size / 2.0f;
-                    walk_stack[using_stack_ptr].node_position[0] = aabb_min[0];
-                    walk_stack[using_stack_ptr].node_position[1] = aabb_min[1];
-                    walk_stack[using_stack_ptr].node_position[2] = aabb_min[2];
-                    walk_stack[using_stack_ptr].entry_distance = tmin;
-                    last_pop_ptr = -1;
-                    // printf("added entry in stack at index %d with entry distance %f\n", using_stack_ptr, tmin);
+            // compute entry point P (use entry.tmin, clamp to 0)
+            float tentry = fmax(entry.tmin, 0.0f);
+            float Px = o0 + d0 * tentry;
+            float Py = o1 + d1 * tentry;
+            float Pz = o2 + d2 * tentry;
+
+            // starting child bits (0 or 1)
+            int bx = (Px >= entry.node_center[0]) ? 1 : 0;
+            int by = (Py >= entry.node_center[1]) ? 1 : 0;
+            int bz = (Pz >= entry.node_center[2]) ? 1 : 0;
+            int childBits = bx | (by << 1) | (bz << 2);
+
+            // plane times to center planes (one division emulated by inv_dir multiply)
+            float tx = (entry.node_center[0] - o0) * inv_dir0;
+            float ty = (entry.node_center[1] - o1) * inv_dir1;
+            float tz = (entry.node_center[2] - o2) * inv_dir2;
+
+            // clamp plane times so those > entry.tmax are ignored (set to +INF if you use min-based stepping,
+            // or -INF if you use max-based). Here we step forward (nearest-first), so invalid plane -> +INF.
+            tx = select(INFINITY, tx, islessequal(tx, entry.tmax));
+            ty = select(INFINITY, ty, islessequal(ty, entry.tmax));
+            tz = select(INFINITY, tz, islessequal(tz, entry.tmax));
+
+            // We'll step at most 4 children in ray order, collect valid children into local nearest-first array
+            OctreeStackEntry local_stack[4];
+            int lp = 0;
+            int bits = childBits;
+            float prev_t = entry.tmin;
+
+            for (int step = 0; step < 4; ++step) {
+                // current child index (0..7)
+                int cidx = bits;
+
+                // compute child center and size:
+                float child_size = entry.node_size * 0.5f;         // child side length
+                float child_half = child_size * 0.5f;             // offset from parent center to child center
+                float child_cx = entry.node_center[0] + ((bits & 1) ?  child_half : -child_half);
+                float child_cy = entry.node_center[1] + ((bits & 2) ?  child_half : -child_half);
+                float child_cz = entry.node_center[2] + ((bits & 4) ?  child_half : -child_half);
+
+                // check child exists BEFORE doing full slab math
+                uint childNodeIdx = node.subnode_indices[cidx];
+                if (childNodeIdx != 0xFFFFFFFFu) {
+                    // compute child slab (using inv_dir)
+                    float xmin = child_cx - 0.5f * child_size;
+                    float xmax = child_cx + 0.5f * child_size;
+                    float ymin = child_cy - 0.5f * child_size;
+                    float ymax = child_cy + 0.5f * child_size;
+                    float zmin = child_cz - 0.5f * child_size;
+                    float zmax = child_cz + 0.5f * child_size;
+
+                    float tx1 = (xmin - o0) * inv_dir0; float tx2 = (xmax - o0) * inv_dir0;
+                    float ch_tmin = fmin(tx1, tx2), ch_tmax = fmax(tx1, tx2);
+
+                    float ty1 = (ymin - o1) * inv_dir1; float ty2 = (ymax - o1) * inv_dir1;
+                    ch_tmin = fmax(ch_tmin, fmin(ty1, ty2)); ch_tmax = fmin(ch_tmax, fmax(ty1, ty2));
+
+                    float tz1 = (zmin - o2) * inv_dir2; float tz2 = (zmax - o2) * inv_dir2;
+                    ch_tmin = fmax(ch_tmin, fmin(tz1, tz2)); ch_tmax = fmin(ch_tmax, fmax(tz1, tz2));
+
+                    // clamp to parent interval
+                    ch_tmin = fmax(ch_tmin, entry.tmin);
+                    ch_tmax = fmin(ch_tmax, entry.tmax);
+
+                    // If valid interval, record it (nearest-first)
+                    if (ch_tmax >= ch_tmin) {
+                        local_stack[lp].node_index = childNodeIdx;
+                        local_stack[lp].tmin = ch_tmin;
+                        local_stack[lp].tmax = ch_tmax;
+                        local_stack[lp].node_center[0] = child_cx;
+                        local_stack[lp].node_center[1] = child_cy;
+                        local_stack[lp].node_center[2] = child_cz;
+                        local_stack[lp].node_size = child_size;
+                        // Optionally compute child's plane times later when popped
+                        lp++;
+                    }
                 }
-                else {
-                    // printf("pushing new entry onto stack at index %d\n", stack_ptr);
-                    stack_ptr++;
-                    walk_stack[stack_ptr].node_index = current_node.subnode_indices[i];
-                    walk_stack[stack_ptr].node_size = current_node_size / 2.0f;
-                    walk_stack[stack_ptr].node_position[0] = aabb_min[0];
-                    walk_stack[stack_ptr].node_position[1] = aabb_min[1];
-                    walk_stack[stack_ptr].node_position[2] = aabb_min[2];
-                    walk_stack[stack_ptr].entry_distance = tmin;
-                    // printf("added entry in stack at index %d with entry distance %f\n", stack_ptr, tmin);
+
+                // find the next plane crossing -> nearest plane time among tx,ty,tz
+                float tnext = fmin(tx, fmin(ty, tz));
+
+                // if the next crossing is outside node interval, break stepping
+                if (tnext > entry.tmax) break;
+                if (tnext <= prev_t) {
+                    // avoid infinite loop (shouldn't normally happen)
+                    // mark the chosen plane as invalid and continue
+                    if (tx <= ty && tx <= tz) { tx = INFINITY; continue; }
+                    if (ty <= tx && ty <= tz) { ty = INFINITY; continue; }
+                    tz = INFINITY; continue;
                 }
+
+                // flip the bit for the axis we crossed, and invalidate that plane so it won't be chosen again
+                bool takeX = (tnext == tx);
+                bool takeY = (tnext == ty);
+                bool takeZ = !takeX && !takeY;
+
+                bits ^= (takeX ? 1 : 0) | (takeY ? 2 : 0) | (takeZ ? 4 : 0);
+
+                tx = takeX ? INFINITY : tx;
+                ty = takeY ? INFINITY : ty;
+                tz = takeZ ? INFINITY : tz;
+
+                prev_t = tnext;
+                // continue stepping to next child (up to 4)
+            } // end for up to 4 children
+
+            // push children into global stack in reverse order (so nearest ends up on top)
+            for (int i = lp - 1; i >= 0; --i) {
+                // optional early prune by bestT
+                if (local_stack[i].tmin > bestT) continue;
+                // push
+                stack[sp++] = local_stack[i];
+                if (sp >= MAXIMUM_OCTREE_NODE_CHECKS) break; // safety
             }
-            // return -1;
-        }
-        // if (max >= 30)
-        //     printf("Max octree checks reached!\n");
-        *out_t = t;
-        return index_found;
+
+            if (iter > MAXIMUM_OCTREE_NODE_CHECKS) break;
+        } // end while stack
+
+        // if (iter > 8)
+        //     printf("iter is pretty big: %d\n", iter);
+
+        *out_t = bestT;
+        return bestPrim;
     }
 
     int walk_chunks(__constant OctreeNode* nodes,
@@ -637,6 +707,7 @@ const RENDER_SRC: &str = r#"
 
         // 2. Compute step direction for each axis
         float dir[3]    = { -ray_cframe[5], -ray_cframe[8], -ray_cframe[11] };
+        float invdir[3]  = { 1.0f / dir[0], 1.0f / dir[1], 1.0f / dir[2] };
         int step_x = (dir[0] > 0) ? 1 : -1;
         int step_y = (dir[1] > 0) ? 1 : -1;
         int step_z = (dir[2] > 0) ? 1 : -1;
@@ -648,13 +719,13 @@ const RENDER_SRC: &str = r#"
         float next_boundary_y = octree_root_node_position[1] + (iy + (step_y > 0 ? 1 : 0)) * octree_root_node_size;
         float next_boundary_z = octree_root_node_position[2] + (iz + (step_z > 0 ? 1 : 0)) * octree_root_node_size;
 
-        float tMaxX = (dir[0] != 0) ? (next_boundary_x - ray_cframe[0]) / dir[0] : INFINITY;
-        float tMaxY = (dir[1] != 0) ? (next_boundary_y - ray_cframe[1]) / dir[1] : INFINITY;
-        float tMaxZ = (dir[2] != 0) ? (next_boundary_z - ray_cframe[2]) / dir[2] : INFINITY;
+        float tMaxX = (dir[0] != 0) ? (next_boundary_x - ray_cframe[0]) * invdir[0] : INFINITY;
+        float tMaxY = (dir[1] != 0) ? (next_boundary_y - ray_cframe[1]) * invdir[1] : INFINITY;
+        float tMaxZ = (dir[2] != 0) ? (next_boundary_z - ray_cframe[2]) * invdir[2] : INFINITY;
 
-        float tDeltaX = (dir[0] != 0) ? octree_root_node_size / fabs(dir[0]) : INFINITY;
-        float tDeltaY = (dir[1] != 0) ? octree_root_node_size / fabs(dir[1]) : INFINITY;
-        float tDeltaZ = (dir[2] != 0) ? octree_root_node_size / fabs(dir[2]) : INFINITY;
+        float tDeltaX = (dir[0] != 0) ? octree_root_node_size * fabs(invdir[0]) : INFINITY;
+        float tDeltaY = (dir[1] != 0) ? octree_root_node_size * fabs(invdir[1]) : INFINITY;
+        float tDeltaZ = (dir[2] != 0) ? octree_root_node_size * fabs(invdir[2]) : INFINITY;
 
         // 4. Traverse chunks
         int index_found = -1;
@@ -674,13 +745,13 @@ const RENDER_SRC: &str = r#"
             if (debug_mode)
                 printf("Traversing chunk %d at (%d, %d, %d) with position (%f, %f, %f)\n", chunk_index, ix, iy, iz, chunk_min[0], chunk_min[1], chunk_min[2]);
             index_found = walk_octree(nodes,
-                                      octree_root_node_size,
-                                      chunk_index,
-                                      chunk_min,
-                                      primitives,
-                                      ray_cframe,
-                                      &t,
-                                      debug_mode);
+                                    octree_root_node_size,
+                                    chunk_index,
+                                    chunk_min,
+                                    primitives,
+                                    ray_cframe,
+                                    &t,
+                                    debug_mode);
 
             // Step to next chunk
             if (tMaxX < tMaxY && tMaxX < tMaxZ) {
